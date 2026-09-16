@@ -50,6 +50,7 @@ class AttributeNormalizer:
             if llm_response:
                 # Шаг 4: Парсинг ответа и применение результатов
                 self._apply_llm_results(parent, llm_response)
+                self._detect_modifications_by_diff(parent)
             else:
                 # Фолбэк: простая эвристика без LLM
                 self._apply_heuristic_normalization(parent)
