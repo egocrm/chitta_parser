@@ -181,6 +181,17 @@ class OllamaEnricher:
             logger.warning(f"⚠️ [OLLAMA CALL FAILED]: {e}")
         return "{}"
 
+    async def generate(self, prompt: str) -> Dict[str, Any]:
+        """Публичный метод для вызова LLM с возвратом распарсенного JSON."""
+        raw_json = await self._call_ollama_raw(prompt)
+        if not raw_json:
+            return {}
+        try:
+            return json.loads(raw_json)
+        except json.JSONDecodeError:
+            logger.error(f"❌ [OLLAMA GENERATE] Ошибка парсинга JSON ответа!")
+            return {}
+
     def _normalize_extracted_attributes(self, data: dict) -> Dict[str, str]:
         """Распаковывает ответ Ollama в плоский словарь атрибутов."""
         if not isinstance(data, dict):
