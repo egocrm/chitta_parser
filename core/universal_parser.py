@@ -706,7 +706,7 @@ class UniversalSemanticParser:
                         if (/^(tel:|mailto:|javascript:|viber:|whatsapp:|tg:)/i.test(href.trim())) continue;
 
                         // Игнорируем прямые файлы изображений, архивов и документов
-                        if (/\.(jpg|jpeg|png|webp|gif|svg|avif|bmp|pdf|zip|rar|7z|doc|docx|xls|xlsx)$/i.test(hrefClean)) continue;
+                        if (/\\.(jpg|jpeg|png|webp|gif|svg|avif|bmp|pdf|zip|rar|7z|doc|docx|xls|xlsx)$/i.test(hrefClean)) continue;
 
                         if (href.includes('sc_content') || href.includes('/category-') || href.includes('/cart') || href.includes('/checkout')) continue;
 
@@ -741,7 +741,7 @@ class UniversalSemanticParser:
                                 const l = cNode.querySelector('label, [class*="label" i], [class*="title" i], [class*="name" i], legend, [class*="heading" i], [id*="attr" i]');
                                 if (l) {
                                     const txt = clean(l.textContent);
-                                    if (txt && txt.length < 50) return txt.replace(/[:\s]+$/, '');
+                                    if (txt && txt.length < 50) return txt.replace(/[:\\s]+$/, '');
                                 }
                                 return '';
                             };
@@ -783,7 +783,7 @@ class UniversalSemanticParser:
                             if (!groupName) groupName = 'option';
                             seenUrls.add(hrefClean);
                             let cleanVal = valText || '';
-                            if (cleanVal.length > 30 || /[0-9]+\s*(грн|₴|\$|€)/i.test(cleanVal) || /переглянути|купити|buy/i.test(cleanVal)) {
+                            if (cleanVal.length > 30 || /[0-9]+\\s*(грн|₴|\\$|€)/i.test(cleanVal) || /переглянути|купити|buy/i.test(cleanVal)) {
                                 cleanVal = '';
                             }
 

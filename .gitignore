@@ -1,26 +1,39 @@
-# Виртуальные окружения
-venv/
-env/
+```
+# Compiled and build artifacts
+*.pyc
+__pycache__/
+
+# Dependencies
 .venv/
+venv/
+node_modules/
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.mypy_cache/
 
 output_csv/
 enricher__delete/
 
-# Кэш Python
-__pycache__/
-*.py[cod]
-*.pyo
+# Environment
+.env
+.env.local
+*.env.*
 
-# Среды разработки
+# Editors
 .vscode/
 .idea/
 
-# Секреты и переменные окружения (ОБЯЗАТЕЛЬНО!)
-.env
-secrets.json
+# OS
+.DS_Store
+Thumbs.db
 
-# Тяжелые файлы
-*.mp4
-*.zip
-*.rar
-dataset/*.csv
+# Coverage
+coverage/
+htmlcov/
+.coverage
+
+# Original rules preserved
+*.log
+```
