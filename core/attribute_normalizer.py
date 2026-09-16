@@ -279,7 +279,7 @@ class AttributeNormalizer:
                 variant.modification_attributes.update(found_mods)
                 logger.info(f"✅ [HEURISTIC] Для варианта {variant.product_id} найдены модификации: {found_mods}")
             else:
-                logger.warning(f"⚠️ [HEURISTIC] Для варианта {variant.product_id} отличий не найдено."        
+                logger.warning(f"⚠️ [HEURISTIC] Для варианта {variant.product_id} отличий не найдено.")        
     
     def _apply_heuristic_normalization(self, parent: ProductParent) -> None:
         """
