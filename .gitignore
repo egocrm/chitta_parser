@@ -4,6 +4,7 @@ env/
 .venv/
 
 output_csv/
+enricher__delete/
 
 # Кэш Python
 __pycache__/
