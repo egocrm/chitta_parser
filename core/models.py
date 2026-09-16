@@ -47,6 +47,11 @@ class ProductVariant:
     country_of_origin: str = ""
     available: str = "yes"
     stock: int = 50
+    
+    # Сырые данные: список найденных пар {name: value} или просто {value: ""}, если имя не найдено
+    raw_attributes: List[Dict[str, str]] = field(default_factory=list)
+    
+    # Структурированные данные (заполняются после нормализации)
     attributes: Dict[str, str] = field(default_factory=dict)
     modification_attributes: Dict[str, str] = field(default_factory=dict)
     
@@ -88,6 +93,11 @@ class ProductParent:
     country_of_origin: str = ""
     available: str = "yes"
     stock: int = 50
+    
+    # Сырые данные родителя (если есть)
+    raw_attributes: List[Dict[str, str]] = field(default_factory=list)
+    
+    # Структурированные данные (заполняются после нормализации)
     attributes: Dict[str, str] = field(default_factory=dict)
     modification_attributes: Dict[str, str] = field(default_factory=dict)
     

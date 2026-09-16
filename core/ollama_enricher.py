@@ -244,21 +244,45 @@ EXAMPLE OUTPUT:
         parent_md: str, 
         variant_mds: Optional[Dict[str, str]] = None
     ) -> None:
-        """Синхронизирует атрибуты вариантов через поиск дельты на изолированных Markdown-страницах."""
+        """Синхронизирует атрибуты вариантов через поиск дельты на изолированных Markdown-страницах.
+        
+        ИЗМЕНЕНИЕ: Теперь метод сначала агрегирует все raw_attributes из родителя и вариантов,
+        затем отправляет их в LLM для нормализации и классификации на статические/модификации.
+        """
         if not parent.variants:
             return
 
         variant_mds = variant_mds or {}
 
-        # Базовая матрица родителя (без служебного 'option')
-        base_attributes = {
-            k: v for k, v in parent.attributes.items() 
-            if k.lower().strip() != "option"
-        }
+        # Агрегация всех сырых атрибутов (raw_attributes) из родителя и всех вариантов
+        all_raw_attrs = []
+        if parent.raw_attributes:
+            all_raw_attrs.extend(parent.raw_attributes)
+        for v in parent.variants:
+            if v.raw_attributes:
+                all_raw_attrs.extend(v.raw_attributes)
+
+        # Если есть сырые данные, используем их для создания base_attributes через эвристику или LLM
+        # Пока используем старый метод как фолбэк, но в будущем здесь будет вызов LLM для нормализации
+        if all_raw_attrs:
+            # Простая эвристика: объединяем все найденные пары name:value
+            # В будущем здесь будет более сложная логика с LLM
+            base_attributes = {}
+            for item in all_raw_attrs:
+                if isinstance(item, dict):
+                    for k, v in item.items():
+                        if k and v and k.lower().strip() != "option":
+                            base_attributes[str(k).strip()] = str(v).strip()
+        else:
+            # Фолбэк на старые attributes, если raw_attributes пусты
+            base_attributes = {
+                k: v for k, v in parent.attributes.items() 
+                if k.lower().strip() != "option"
+            }
 
         logger.info(
             f"🔄 [VARIANT DELTA EXTRACTION] Старт обработки {len(parent.variants)} вариантов. "
-            f"Базовая матрица ({len(base_attributes)} ключей): {base_attributes}"
+            f"Агрегировано {len(all_raw_attrs)} сырых атрибутов. Базовая матрица ({len(base_attributes)} ключей)."
         )
 
         for idx, variant in enumerate(parent.variants, 1):

@@ -12,6 +12,7 @@ from core.state_machine import CatalogStateMachine
 from core.universal_parser import UniversalSemanticParser
 from core.engine_detector import EngineDetector
 from core.ollama_enricher import OllamaEnricher
+from core.attribute_normalizer import AttributeNormalizer
 from exporters.csv_exporter import CSVExporter
 import config
 
@@ -95,6 +96,9 @@ def merge_product_data(primary: Optional[ProductParent], secondary: Optional[Pro
     Динамически сливает данные двух объектов ProductParent.
     Значения из `primary` имеют приоритет, за исключением поля `image`,
     где выбирается вариант с наибольшим количеством ссылок на картинки (галерея).
+    
+    ИЗМЕНЕНИЯ: Сырые атрибуты (raw_attributes) теперь объединяются, а не перезаписываются.
+    Структурированные атрибуты НЕ копируются автоматически (будут заполнены после нормализации LLM).
     """
     if not primary:
         return secondary
@@ -104,6 +108,10 @@ def merge_product_data(primary: Optional[ProductParent], secondary: Optional[Pro
     # 1. Слияние основных полей объекта
     for attr, sec_val in secondary.__dict__.items():
         if attr.startswith("_"):
+            continue
+        
+        # Пропускаем сырые и структурированные атрибуты в основном цикле - они обрабатываются отдельно
+        if attr in ["attributes", "modification_attributes", "raw_attributes"]:
             continue
 
         pri_val = getattr(primary, attr, None)
@@ -128,12 +136,15 @@ def merge_product_data(primary: Optional[ProductParent], secondary: Optional[Pro
         if pri_val in [None, "", 0.0, [], {}] and sec_val not in [None, "", 0.0, [], {}]:
             setattr(primary, attr, sec_val)
 
-    # 2. Дополнение характеристик (attributes)
-    if hasattr(secondary, "attributes") and isinstance(secondary.attributes, dict):
-        if not primary.attributes:
-            for k, v in secondary.attributes.items():
-                if v:
-                    primary.attributes[k] = v
+    # 2. Объединение сырых атрибутов (raw_attributes) - ключевое изменение
+    # Собираем все найденные сырые данные из обоих источников для последующей обработки LLM
+    if hasattr(secondary, "raw_attributes") and isinstance(secondary.raw_attributes, list):
+        if not primary.raw_attributes:
+            primary.raw_attributes = []
+        # Добавляем только уникальные записи из secondary, которых еще нет в primary
+        for sec_item in secondary.raw_attributes:
+            if sec_item not in primary.raw_attributes:
+                primary.raw_attributes.append(sec_item)
 
     # 3. Перенос вариантов, если у primary они отсутствовали
     if not primary.variants and secondary.variants:
@@ -544,16 +555,36 @@ async def run_parser(
                             has_variants = bool(parent_product.variants)
                             has_mod_attributes = any(v.modification_attributes for v in parent_product.variants) or bool(parent_product.modification_attributes)
 
-                            if has_variants and not has_mod_attributes and enable_ollama and enricher:
-                                logger.info(f"🤖 [OLLAMA SMART FALLBACK] Delta Extraction для вариантов ID: {parent_product.product_id}...")
+                            # Нормализация атрибутов через LLM или эвристику
+                            if has_variants and enable_ollama and enricher:
+                                logger.info(f"🤖 [ATTRIBUTE NORMALIZER] Запуск нормализации атрибутов для ID: {parent_product.product_id}...")
                                 try:
-                                    html_body = await page.content()
-                                    parent_md = enricher.extract_markdown_from_html(html_body, parent=parent_product)
-                                    if parent_md:
-                                        await enricher.process_variants_attributes(parent_product, parent_md=parent_md)
-                                        parent_product.sanitize_modification_attributes()
-                                except Exception as ollama_err:
-                                    logger.warning(f"⚠️ [OLLAMA SMART FALLBACK WARN] Ошибка Delta Extraction: {ollama_err}")
+                                    # Создаем нормализатор с тем же Ollama клиентом
+                                    normalizer = AttributeNormalizer(ollama_client=enricher)
+                                    await normalizer.normalize_parent_attributes(parent_product)
+                                    
+                                    # Дополнительно запускаем Delta Extraction, если модификации все еще не заполнены
+                                    has_mod_attributes = any(v.modification_attributes for v in parent_product.variants) or bool(parent_product.modification_attributes)
+                                    if not has_mod_attributes:
+                                        logger.info(f"🤖 [OLLAMA SMART FALLBACK] Delta Extraction для вариантов ID: {parent_product.product_id}...")
+                                        html_body = await page.content()
+                                        parent_md = enricher.extract_markdown_from_html(html_body, parent=parent_product)
+                                        if parent_md:
+                                            await enricher.process_variants_attributes(parent_product, parent_md=parent_md)
+                                    
+                                    # Финальная очистка и синхронизация
+                                    parent_product.sanitize_modification_attributes()
+                                except Exception as norm_err:
+                                    logger.warning(f"⚠️ [ATTRIBUTE NORMALIZER WARN] Ошибка нормализации: {norm_err}")
+                            elif has_variants and not has_mod_attributes:
+                                # Эвристическая нормализация без LLM
+                                logger.info(f"🔧 [HEURISTIC NORMALIZER] Применяем эвристику для ID: {parent_product.product_id}...")
+                                try:
+                                    normalizer = AttributeNormalizer(ollama_client=None)
+                                    await normalizer.normalize_parent_attributes(parent_product)
+                                    parent_product.sanitize_modification_attributes()
+                                except Exception as heur_err:
+                                    logger.warning(f"⚠️ [HEURISTIC NORMALIZER WARN] Ошибка эвристики: {heur_err}")
                         else:
                             logger.error(f"❌ [PARSING FAIL] Не удалось определить валидный системный product_id для: {link}")
 
