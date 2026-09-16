@@ -89,9 +89,17 @@ class CSVExporter:
         return sorted(list(extra_keys), key=sort_key)        
 
     def _get_all_attribute_keys(self, parents: List[ProductParent]) -> List[str]:
-        """Собирает все уникальные ключи динамических атрибутов из attributes И modification_attributes, очищая их от префиксов. Исключает ключи модификаций."""
-        # Ключи, которые являются модификациями и не должны попадать в файл _goods
-        modification_keys = {"color", "size", "colour", "sizes", "colors", "colours"}
+        """Собирает все уникальные ключи динамических атрибутов из attributes И modification_attributes, очищая их от префиксов. Исключает ВСЕ ключи модификаций (не только color/size)."""
+        # Ключи модификаций собираются динамически из всех товаров
+        modification_keys = set()
+        for parent in parents:
+            for k in parent.modification_attributes.keys():
+                clean_k = k[13:] if k.startswith("modification_") else k
+                modification_keys.add(clean_k.lower())
+            for variant in parent.variants:
+                for k in variant.modification_attributes.keys():
+                    clean_k = k[13:] if k.startswith("modification_") else k
+                    modification_keys.add(clean_k.lower())
         
         attr_keys: Set[str] = set()
         for parent in parents:
@@ -101,12 +109,10 @@ class CSVExporter:
                 # Пропускаем ключи модификаций
                 if clean_k.lower() not in modification_keys:
                     attr_keys.add(clean_k)
-            # Собираем из modification_attributes
+            # Собираем из modification_attributes (но не добавляем их в attr_keys)
+            # Этот блок оставлен для совместимости, но ничего не добавляет
             for k in parent.modification_attributes.keys():
-                clean_k = k[13:] if k.startswith("modification_") else k
-                # Пропускаем ключи модификаций
-                if clean_k.lower() not in modification_keys:
-                    attr_keys.add(clean_k)
+                pass  # Модификации не попадают в атрибуты
                 
             for variant in parent.variants:
                 # Собираем из attributes варианта
@@ -115,12 +121,9 @@ class CSVExporter:
                     # Пропускаем ключи модификаций
                     if clean_k.lower() not in modification_keys:
                         attr_keys.add(clean_k)
-                # Собираем из modification_attributes варианта
+                # Собираем из modification_attributes варианта (но не добавляем их в attr_keys)
                 for k in variant.modification_attributes.keys():
-                    clean_k = k[13:] if k.startswith("modification_") else k
-                    # Пропускаем ключи модификаций
-                    if clean_k.lower() not in modification_keys:
-                        attr_keys.add(clean_k)
+                    pass  # Модификации не попадают в атрибуты
         return sorted(list(attr_keys))
 
     def export_categories(self, categories: List[Category], filename: str):
@@ -179,16 +182,13 @@ class CSVExporter:
                         self._clean_text(v.brand_name), self._clean_text(v.manufacturer), self._clean_text(v.country_of_origin)
                     ]
                     for attr in dynamic_attrs:
-                        # Приоритет: свои атрибуты варианта -> свои modification_attributes -> атрибуты родителя
+                        # Приоритет: свои атрибуты варианта -> атрибуты родителя
+                        # modification_attributes НЕ попадают в файл _goods (только в _attrs)
                         val = (
                             v.attributes.get(attr, "") 
                             or v.attributes.get(f"attr_{attr}", "") 
-                            or v.modification_attributes.get(attr, "") 
-                            or v.modification_attributes.get(f"modification_{attr}", "") 
                             or p.attributes.get(attr, "") 
                             or p.attributes.get(f"attr_{attr}", "")
-                            or p.modification_attributes.get(attr, "") 
-                            or p.modification_attributes.get(f"modification_{attr}", "") 
                         )
                         v_row.append(self._clean_text(val))
                     writer.writerow(v_row)
