@@ -26,6 +26,8 @@ wheels/
 venv/
 ENV/
 
+output_csv/
+
 # IDE
 .vscode/
 .idea/
