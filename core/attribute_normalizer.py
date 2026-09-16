@@ -4,6 +4,7 @@
 """
 import json
 import logging
+import re
 from typing import Dict, List, Any, Optional, Tuple
 from core.models import ProductParent, ProductVariant
 
@@ -165,25 +166,41 @@ class AttributeNormalizer:
     
     def _apply_llm_results(self, parent: ProductParent, llm_data: Dict) -> None:
         """Применяет результаты нормализации от LLM."""
+        logger.info(f"✅ [LLM APPLY] Применяем результаты нормализации для {parent.product_id}")
         
         # Применяем статические атрибуты к родителю
         static_attrs = llm_data.get("static_attributes", {})
-        parent.attributes = {str(k).strip(): str(v).strip() for k, v in static_attrs.items() if k and v}
+        if static_attrs:
+            parent.attributes = {str(k).strip(): str(v).strip() for k, v in static_attrs.items() if k and v}
+            logger.info(f"📋 [LLM APPLY] Записано {len(parent.attributes)} статических атрибутов в родителя")
+        else:
+            logger.warning("⚠️ [LLM APPLY] LLM не вернул статические атрибуты")
         
         # Получаем ключи модификаций
         mod_keys = llm_data.get("modification_keys", [])
-        for mk in mod_keys:
-            if mk and str(mk).strip():
-                parent.modification_attributes[str(mk).strip()] = ""
+        if mod_keys:
+            for mk in mod_keys:
+                if mk and str(mk).strip():
+                    parent.modification_attributes[str(mk).strip()] = ""
+            logger.info(f"🔑 [LLM APPLY] Добавлено {len(mod_keys)} ключей модификаций: {mod_keys}")
+        else:
+            logger.warning("⚠️ [LLM APPLY] LLM не вернул ключи модификаций")
         
         # Применяем модификации к вариантам
         variant_mods = llm_data.get("variant_modifications", {})
+        applied_count = 0
         for v in parent.variants:
             v_mods = variant_mods.get(str(v.product_id), {})
             if v_mods:
                 for mk, mv in v_mods.items():
                     if mk and mv:
                         v.modification_attributes[str(mk).strip()] = str(mv).strip()
+                        applied_count += 1
+                logger.debug(f"✏️ [LLM APPLY] Вариант {v.product_id}: записаны модификации {v_mods}")
+            else:
+                logger.debug(f"⚠️ [LLM APPLY] Вариант {v.product_id}: нет данных модификаций от LLM")
+        
+        logger.info(f"✅ [LLM APPLY] Всего применено {applied_count} модификаций к вариантам")
     
     def _apply_heuristic_normalization(self, parent: ProductParent) -> None:
         """
