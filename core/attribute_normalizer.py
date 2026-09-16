@@ -168,6 +168,9 @@ class AttributeNormalizer:
         """Применяет результаты нормализации от LLM."""
         logger.info(f"✅ [LLM APPLY] Применяем результаты нормализации для {parent.product_id}")
         
+        # Логгируем сырые данные от LLM для отладки
+        logger.debug(f"🔍 [LLM DEBUG] Сырые данные от LLM: {json.dumps(llm_data, ensure_ascii=False, indent=2)}")
+        
         # Применяем статические атрибуты к родителю
         static_attrs = llm_data.get("static_attributes", {})
         if static_attrs:
@@ -188,17 +191,29 @@ class AttributeNormalizer:
         
         # Применяем модификации к вариантам
         variant_mods = llm_data.get("variant_modifications", {})
-        applied_count = 0
+        logger.debug(f"🔍 [LLM DEBUG] variant_modifications от LLM: {variant_mods}")
+        
+        # Собираем все возможные ключи для сопоставления (строковые и числовые)
+        variant_id_map = {}
         for v in parent.variants:
-            v_mods = variant_mods.get(str(v.product_id), {})
-            if v_mods:
+            variant_id_map[str(v.product_id)] = v
+            variant_id_map[v.product_id] = v  # На случай если ключ числовой
+            logger.debug(f"🗺️ [LLM DEBUG] Зарегистрирован вариант ID: {v.product_id} (str: '{str(v.product_id)}')")
+        
+        applied_count = 0
+        for llm_key, v_mods in variant_mods.items():
+            logger.debug(f"🔍 [LLM DEBUG] Обработка ключа LLM '{llm_key}' -> {v_mods}")
+            
+            v = variant_id_map.get(llm_key) or variant_id_map.get(str(llm_key))
+            
+            if v and v_mods:
                 for mk, mv in v_mods.items():
                     if mk and mv:
                         v.modification_attributes[str(mk).strip()] = str(mv).strip()
                         applied_count += 1
-                logger.debug(f"✏️ [LLM APPLY] Вариант {v.product_id}: записаны модификации {v_mods}")
+                        logger.debug(f"✏️ [LLM APPLY] Вариант {v.product_id}: записана модификация '{mk}' = '{mv}'")
             else:
-                logger.debug(f"⚠️ [LLM APPLY] Вариант {v.product_id}: нет данных модификаций от LLM")
+                logger.warning(f"⚠️ [LLM APPLY] Не найден вариант для ключа LLM '{llm_key}'. Доступные IDs: {list(variant_id_map.keys())}")
         
         logger.info(f"✅ [LLM APPLY] Всего применено {applied_count} модификаций к вариантам")
     
