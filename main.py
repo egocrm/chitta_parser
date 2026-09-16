@@ -187,7 +187,7 @@ async def enrich_missing_fields_with_ollama(
     if not parent_product.brand_name: missing_fields.append("brand_name")
     if not parent_product.manufacturer: missing_fields.append("manufacturer")
     if not parent_product.country_of_origin: missing_fields.append("country_of_origin")
-    if parent_product.price <= parent_product.fact_price: missing_fields.append("old_price")
+    if not parent_product.price or parent_product.fact_price >= parent_product.price: missing_fields.append("old_price")
     if not parent_product.sales_notes: missing_fields.append("sales_notes")
     if not parent_product.bonus: missing_fields.append("bonus")
 
@@ -457,6 +457,13 @@ async def run_parser(
                             logger.info(f"🔄 [MEMORY RECYCLING] Вкладка браузера перезапущена для освобождения RAM (обработано товаров: {idx - 1}).")
                         except Exception as e:
                             logger.warning(f"⚠️ [MEMORY RECYCLING WARN] Не удалось перезапустить вкладку: {e}")
+                            # Если не удалось создать новую страницу, пробуем создать её при следующей итерации
+                            if page.is_closed():
+                                try:
+                                    page = await browser.new_page()
+                                except Exception as e2:
+                                    logger.error(f"❌ [MEMORY RECYCLING ERROR] Критическая ошибка создания новой вкладки: {e2}")
+                                    raise
 
                     logger.info(f"🌐 [PAGE] Обработка товара [{idx}/{len(target_links)}]: {link}") 
 

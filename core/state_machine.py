@@ -26,10 +26,15 @@ class CatalogStateMachine:
         if not parts:
             return False
         for part in parts:
+            # Проверяем Base64 изображения
+            if part.startswith('data:image/'):
+                continue
             clean_part = part.split("?")[0].split("#")[0].lower()
             has_ext = any(clean_part.endswith(ext) for ext in valid_extensions)
             has_cdn = any(ind in part.lower() for ind in cdn_indicators)
-            if not (has_ext or has_cdn):
+            # Разрешаем относительные пути (начинаются с / или не содержат протокол)
+            is_relative = part.startswith('/') or ('://' not in part)
+            if not (has_ext or has_cdn or is_relative):
                 return False
         return True
 
