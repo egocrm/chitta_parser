@@ -229,6 +229,57 @@ class AttributeNormalizer:
                 logger.warning(f"⚠️ [LLM APPLY] Не найден вариант для ключа LLM '{llm_key}'. Доступные IDs: {list(variant_id_map.keys())}")
         
         logger.info(f"✅ [LLM APPLY] Всего применено {applied_count} модификаций к вариантам")
+
+    def _detect_modifications_by_diff(self, parent: ProductParent) -> None:
+        """
+        Выявляет модификации путем прямого сравнения данных родителя и вариантов.
+        Игнорирует ответ LLM, если найдены явные различия в ключевых полях.
+        """
+        logger.info(f"🔍 [HEURISTIC] Запуск сравнения для {len(parent.variants)} вариантов...")
+        
+        # Ключи для проверки на отличия
+        check_keys = ['color', 'size', 'volume', 'weight', 'memory', 'power']
+        
+        for variant in parent.variants:
+            found_mods = {}
+            
+            # 1. Сравнение сырых атрибутов (raw_attributes)
+            parent_raw = {str(k).lower(): str(v).lower() for k, v in parent.raw_attributes.items()}
+            variant_raw = {str(k).lower(): str(v).lower() for k, v in variant.raw_attributes.items()}
+            
+            for key in check_keys:
+                p_val = parent_raw.get(key, '')
+                v_val = variant_raw.get(key, '')
+                
+                # Если значения разные и у варианта есть значение
+                if v_val and p_val != v_val:
+                    found_mods[key] = v_val
+                    logger.debug(f"   - Найдено отличие по '{key}': {p_val} -> {v_val}")
+            
+            # 2. Эвристика по SKU и Названию (если атрибуты не найдены)
+            if not found_mods:
+                # Цвет
+                colors = ['black', 'white', 'red', 'blue', 'green', 'olive', 'pink', 'tiffany', 'gold', 'silver', 'champagne', 'violet']
+                for c in colors:
+                    if c in variant.sku.lower() or c in variant.title.lower():
+                        if c not in parent.sku.lower() and c not in parent.title.lower():
+                            found_mods['color'] = c
+                            break
+                
+                # Размер (цифры в SKU)
+                import re
+                nums = re.findall(r'\d{2,3}', variant.sku)
+                for n in nums:
+                    if n not in parent.sku:
+                        found_mods['size'] = n
+                        break
+            
+            # Запись найденных модификаций
+            if found_mods:
+                variant.modification_attributes.update(found_mods)
+                logger.info(f"✅ [HEURISTIC] Для варианта {variant.product_id} найдены модификации: {found_mods}")
+            else:
+                logger.warning(f"⚠️ [HEURISTIC] Для варианта {variant.product_id} отличий не найдено."        
     
     def _apply_heuristic_normalization(self, parent: ProductParent) -> None:
         """
