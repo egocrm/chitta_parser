@@ -10,6 +10,9 @@ venv/
 .env.local
 *.env.*
 
+# Data
+output_csv/
+
 # Logs
 *.log
 
