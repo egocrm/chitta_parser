@@ -130,18 +130,34 @@ class AttributeNormalizer:
             return None
         
         try:
+            logger.info("🤖 [LLM CALL] Отправка запроса на нормализацию атрибутов...")
             response = await self.ollama_client.generate(prompt)
+            
+            logger.debug(f"📥 [LLM RESPONSE] Получен ответ типа {type(response)}: {str(response)[:200]}...")
+            
             # Парсим JSON из ответа
-            # Предполагаем, что ollama_client.generate возвращает строку
+            # Предполагаем, что ollama_client.generate возвращает строку или dict
             if isinstance(response, str):
+                logger.debug("📝 [LLM RESPONSE] Ответ - строка, пытаемся найти JSON...")
                 # Ищем JSON в ответе
                 start_idx = response.find('{')
                 end_idx = response.rfind('}') + 1
                 if start_idx >= 0 and end_idx > start_idx:
                     json_str = response[start_idx:end_idx]
-                    return json.loads(json_str)
+                    logger.debug(f"📦 [LLM JSON] Извлечена JSON строка: {json_str[:100]}...")
+                    result = json.loads(json_str)
+                    logger.info("✅ [LLM PARSE] JSON успешно распарсен")
+                    return result
+                else:
+                    logger.warning("⚠️ [LLM PARSE] JSON не найден в ответе")
             elif isinstance(response, dict):
+                logger.info("✅ [LLM RESPONSE] Ответ уже является словарем")
                 return response
+            else:
+                logger.warning(f"⚠️ [LLM RESPONSE] Неожиданный тип ответа: {type(response)}")
+                
+        except json.JSONDecodeError as e:
+            logger.error(f"❌ [NORMALIZER] Ошибка парсинга JSON от LLM: {e}")
         except Exception as e:
             logger.error(f"❌ [NORMALIZER] Ошибка вызова LLM: {e}")
         
@@ -171,68 +187,100 @@ class AttributeNormalizer:
     
     def _apply_heuristic_normalization(self, parent: ProductParent) -> None:
         """
-        Простая эвристическая нормализация без LLM.
-        Используется как фолбэк или для быстрых тестов.
+        Улучшенная эвристическая нормализация без LLM.
+        Приоритет: данные из special_fields (найденные парсером) > анализ SKU/названия > raw_attributes.
         """
-        logger.info(f"🔧 [NORMALIZER] Применяем эвристическую нормализацию для {parent.product_id}")
+        logger.info(f"🔧 [NORMALIZER] Применяем улучшенную эвристику для {parent.product_id}")
         
-        # Словари известных модификаций
-        mod_keywords = {
-            "color": ["цвет", "color", "колір"],
-            "size": ["размер", "size", "розмір", "габарит"],
-            "volume": ["объем", "volume", "об'єм", "літраж"],
-            "weight": ["вес", "weight", "вага"],
-            "memory": ["память", "memory", "пам'ять", "gb", "гб"],
-        }
+        all_products = [parent] + parent.variants
         
-        # Собираем все уникальные ключи из raw_attributes
-        all_keys = set()
-        all_values = {}
+        # ЭТАП 1: Перенос данных из special_fields (если парсер уже нашел модификации)
+        for prod in all_products:
+            if hasattr(prod, 'special_fields') and prod.special_fields:
+                if 'color' in prod.special_fields and not prod.modification_attributes.get('color'):
+                    prod.modification_attributes['color'] = prod.special_fields['color']
+                    logger.debug(f"✅ Перенесен цвет из special_fields для {prod.product_id}: {prod.special_fields['color']}")
+                if 'size' in prod.special_fields and not prod.modification_attributes.get('size'):
+                    prod.modification_attributes['size'] = prod.special_fields['size']
+                    logger.debug(f"✅ Перенесен размер из special_fields для {prod.product_id}: {prod.special_fields['size']}")
+
+        # ЭТАП 2: Эвристический анализ для тех, у кого модификации еще не заполнены
+        for prod in all_products:
+            # Пропускаем, если уже есть и цвет, и размер
+            if prod.modification_attributes.get('color') and prod.modification_attributes.get('size'):
+                continue
+
+            text_to_analyze = f"{prod.title} {prod.sku}".lower()
+            
+            # --- Определение цвета ---
+            if not prod.modification_attributes.get('color'):
+                color_candidates = ['black', 'white', 'red', 'blue', 'green', 'olive', 'pink', 'gold', 
+                                    'champagne', 'tiffany', 'silver', 'grey', 'gray', 'brown', 'orange', 
+                                    'purple', 'yellow', 'beige', 'navy', 'cyan', 'magenta']
+                
+                # Поиск в названии и SKU
+                for color in color_candidates:
+                    if color in text_to_analyze:
+                        prod.modification_attributes['color'] = color
+                        logger.debug(f"🎨 Найден цвет в названии/SKU для {prod.product_id}: {color}")
+                        break
+                
+                # Если не найдено, пробуем найти в raw_attributes
+                if not prod.modification_attributes.get('color'):
+                    for raw in prod.raw_attributes or []:
+                        if isinstance(raw, dict):
+                            val = str(list(raw.values())[0]).lower() if raw else ""
+                        elif isinstance(raw, str):
+                            val = raw.lower()
+                        else:
+                            continue
+                        
+                        for color in color_candidates:
+                            if color in val:
+                                prod.modification_attributes['color'] = raw if isinstance(raw, str) else list(raw.values())[0]
+                                break
+                        if prod.modification_attributes.get('color'):
+                            break
+
+            # --- Определение размера / типа комплекта ---
+            if not prod.modification_attributes.get('size'):
+                # 1. Проверка на наборы (Set, Kit, 3-piece)
+                if any(x in text_to_analyze for x in ['set', 'набір', 'kit', 'piece', '3-', 'три ', 'комплект']):
+                    prod.modification_attributes['size'] = 'Set'
+                    logger.debug(f"📦 Найден набор для {prod.product_id}")
+                else:
+                    # 2. Поиск цифр в SKU, отличающихся от родителя
+                    if prod.parent_product_id and parent.sku:
+                        parent_numbers = set(re.findall(r'\d+', parent.sku or ""))
+                        current_numbers = set(re.findall(r'\d+', prod.sku or ""))
+                        diff_numbers = current_numbers - parent_numbers
+                        
+                        if diff_numbers:
+                            # Фильтруем: оставляем числа длиной 2-3 цифры (размеры типа 55, 65, 75)
+                            candidates = [n for n in diff_numbers if 2 <= len(n) <= 3]
+                            if candidates:
+                                prod.modification_attributes['size'] = max(candidates) # Берем наибольшее
+                                logger.debug(f"📏 Найден размер через разницу SKU для {prod.product_id}: {prod.modification_attributes['size']}")
+                    
+                    # 3. Поиск явных маркеров размера в названии (например, "65 см")
+                    if not prod.modification_attributes.get('size'):
+                        match = re.search(r'\b(\d{2,3})\s*["\']?\s*(cm|см|inch|дюйм)?\b', text_to_analyze)
+                        if match:
+                            prod.modification_attributes['size'] = match.group(1)
+                            logger.debug(f"📏 Найден размер в названии для {prod.product_id}: {prod.modification_attributes['size']}")
+
+        # ЭТАП 3: Заполнение статических атрибутов из raw_attributes (если они есть)
+        # Собираем общие атрибуты, которые не являются модификациями
+        static_attrs = {}
+        mod_keys = {'color', 'size', 'volume', 'weight', 'memory'}
         
-        for item in parent.raw_attributes:
+        for item in parent.raw_attributes or []:
             if isinstance(item, dict):
                 for k, v in item.items():
-                    if k and v:
-                        all_keys.add(str(k).lower().strip())
-                        all_values[str(k).strip()] = str(v).strip()
+                    key_lower = str(k).lower().strip()
+                    if not any(mk in key_lower for mk in mod_keys):
+                        static_attrs[str(k).strip()] = str(v).strip()
         
-        for v in parent.variants:
-            for item in v.raw_attributes:
-                if isinstance(item, dict):
-                    for k, val in item.items():
-                        if k and val:
-                            all_keys.add(str(k).lower().strip())
-                            all_values[str(k).strip()] = str(val).strip()
-        
-        # Классифицируем ключи
-        static_attrs = {}
-        mod_attrs_keys = set()
-        
-        for key_lower in all_keys:
-            is_mod = False
-            for mod_key, keywords in mod_keywords.items():
-                if any(kw in key_lower for kw in keywords):
-                    mod_attrs_keys.add(key_lower)
-                    is_mod = True
-                    break
-            
-            if not is_mod:
-                # Находим оригинальный ключ (с правильным регистром)
-                orig_key = next((k for k in all_values.keys() if k.lower().strip() == key_lower), key_lower)
-                static_attrs[orig_key] = all_values.get(orig_key, "")
-        
-        # Применяем к родителю
-        parent.attributes = static_attrs
-        for mk in mod_attrs_keys:
-            orig_key = next((k for k in all_values.keys() if k.lower().strip() == mk), mk)
-            parent.modification_attributes[orig_key] = ""
-        
-        # Заполняем модификации вариантов
-        for v in parent.variants:
-            for item in v.raw_attributes:
-                if isinstance(item, dict):
-                    for k, val in item.items():
-                        if k and val:
-                            key_lower = str(k).lower().strip()
-                            if key_lower in mod_attrs_keys:
-                                v.modification_attributes[k.strip()] = str(val).strip()
+        if static_attrs:
+            parent.attributes = static_attrs
+            logger.debug(f"📋 Добавлено {len(static_attrs)} статических атрибутов для родителя {parent.product_id}")
