@@ -25,4 +25,6 @@ dist/
 *.swp
 *.swo
 *~
-```output_csv/
+```
+
+output_csv/
