@@ -164,10 +164,13 @@ class CatalogStateMachine:
         has_mod_values = any(v for v in variant.modification_attributes.values() if v and str(v).strip())
         
         if variant.product_id == parent_product_id:
-            for attr_k, attr_v in variant.attributes.items():
-                if attr_v and attr_k not in parent.attributes:
-                    parent.attributes[attr_k] = attr_v
-
+            # ИЗМЕНЕНИЕ: Копируем только сырые атрибуты (raw_attributes), структурированные attributes НЕ копируем
+            # Они будут заполнены после нормализации LLM
+            if variant.raw_attributes:
+                for raw_item in variant.raw_attributes:
+                    if raw_item not in parent.raw_attributes:
+                        parent.raw_attributes.append(raw_item)
+            
             if variant.sku and (not parent.sku or parent.sku == parent_product_id):
                 parent.sku = variant.sku
 

@@ -584,7 +584,8 @@ class FastSelectorParser:
                             k_text = self._clean_text(await k_el.inner_text(timeout=1500))
                             v_text = self._clean_text(await v_el.inner_text(timeout=1500))
                             if k_text and v_text:
-                                parent.attributes[k_text] = v_text
+                                # ИЗМЕНЕНИЕ: Сохраняем найденные атрибуты в raw_attributes вместо attributes
+                                parent.raw_attributes.append({k_text: v_text})
             except Exception as e:
                 logger.warning(f"⚠️ [FAST PARSER v2] Ошибка сбора характеристик: {e}")
 
