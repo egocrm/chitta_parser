@@ -11,6 +11,9 @@ env/
 # Dependencies
 node_modules/
 
+# Data
+output_csv/
+
 # Logs
 *.log
 
