@@ -193,18 +193,31 @@ class AttributeNormalizer:
         variant_mods = llm_data.get("variant_modifications", {})
         logger.debug(f"🔍 [LLM DEBUG] variant_modifications от LLM: {variant_mods}")
         
-        # Собираем все возможные ключи для сопоставления (строковые и числовые)
+        # Собираем все возможные ключи для сопоставления: product_id (int и str) и SKU
         variant_id_map = {}
+        variant_sku_map = {}
         for v in parent.variants:
+            # Маппинг по ID
             variant_id_map[str(v.product_id)] = v
             variant_id_map[v.product_id] = v  # На случай если ключ числовой
             logger.debug(f"🗺️ [LLM DEBUG] Зарегистрирован вариант ID: {v.product_id} (str: '{str(v.product_id)}')")
+            
+            # Маппинг по SKU
+            if v.sku:
+                variant_sku_map[str(v.sku).strip().lower()] = v
+                logger.debug(f"🗺️ [LLM DEBUG] Зарегистрирован вариант SKU: {v.sku}")
         
         applied_count = 0
         for llm_key, v_mods in variant_mods.items():
             logger.debug(f"🔍 [LLM DEBUG] Обработка ключа LLM '{llm_key}' -> {v_mods}")
             
+            # Ищем вариант сначала по ID, потом по SKU
             v = variant_id_map.get(llm_key) or variant_id_map.get(str(llm_key))
+            if not v:
+                # Если не нашли по ID, пробуем найти по SKU (нормализуя регистр)
+                v = variant_sku_map.get(str(llm_key).strip().lower())
+                if v:
+                    logger.debug(f"✅ [LLM APPLY] Найден вариант по SKU '{llm_key}' -> ID {v.product_id}")
             
             if v and v_mods:
                 for mk, mv in v_mods.items():
