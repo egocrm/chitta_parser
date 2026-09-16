@@ -596,11 +596,11 @@ EXPECTED OUTPUT EXAMPLE:
 
 Return ONLY a valid JSON object dictionary mapping raw keys to normalized keys."""
 
-        res = await self._call_gemini(prompt, step_name="ATTRIBUTES MAPPING CLEANER")
+        res = await self._call_ollama(prompt, step_name="ATTRIBUTES MAPPING CLEANER")
         if isinstance(res, dict):
             return res
         
-        logger.error("❌ [ATTR MAPPING ERR] Не удалось получить словарь маппинга ключей от Gemini.")
+        logger.error("❌ [ATTR MAPPING ERR] Не удалось получить словарь маппинга ключей от Ollama.")
         return {}
 
     def _build_prompt_scalars(self, cleaned_html: str, engine_name: str) -> str:
