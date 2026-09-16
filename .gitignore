@@ -11,6 +11,11 @@ node_modules/
 # Logs and temp files
 *.log
 *.tmp
+output_csv/
+
+# IDE
+.vscode/
+.idea/
 *.swp
 
 # Environment
