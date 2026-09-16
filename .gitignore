@@ -13,10 +13,8 @@ build/
 .pytest_cache/
 .mypy_cache/
 
-# Logs and temp files
-*.log
-*.tmp
-*.swp
+output_csv/
+enricher__delete/
 
 # Environment
 .env
