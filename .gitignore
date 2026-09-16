@@ -1,0 +1,25 @@
+# Виртуальные окружения
+venv/
+env/
+.venv/
+
+output_csv/
+
+# Кэш Python
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Среды разработки
+.vscode/
+.idea/
+
+# Секреты и переменные окружения (ОБЯЗАТЕЛЬНО!)
+.env
+secrets.json
+
+# Тяжелые файлы
+*.mp4
+*.zip
+*.rar
+dataset/*.csv
