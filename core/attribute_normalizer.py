@@ -241,16 +241,32 @@ class AttributeNormalizer:
         # Ключи для проверки на отличия
         check_keys = ['color', 'size', 'volume', 'weight', 'memory', 'power']
         
+        # Конвертируем raw_attributes родителя в словарь для удобного доступа
+        # raw_attributes - это список словарей [{name: value}, ...] или [{value: ""}, ...]
+        parent_raw_dict = {}
+        for item in parent.raw_attributes or []:
+            if isinstance(item, dict):
+                if item:  # не пустой словарь
+                    key = list(item.keys())[0]
+                    val = item[key]
+                    parent_raw_dict[str(key).lower()] = str(val).lower()
+        
         for variant in parent.variants:
             found_mods = {}
             
-            # 1. Сравнение сырых атрибутов (raw_attributes)
-            parent_raw = {str(k).lower(): str(v).lower() for k, v in parent.raw_attributes.items()}
-            variant_raw = {str(k).lower(): str(v).lower() for k, v in variant.raw_attributes.items()}
+            # Конвертируем raw_attributes варианта в словарь
+            variant_raw_dict = {}
+            for item in variant.raw_attributes or []:
+                if isinstance(item, dict):
+                    if item:
+                        key = list(item.keys())[0]
+                        val = item[key]
+                        variant_raw_dict[str(key).lower()] = str(val).lower()
             
+            # 1. Сравнение сырых атрибутов (raw_attributes)
             for key in check_keys:
-                p_val = parent_raw.get(key, '')
-                v_val = variant_raw.get(key, '')
+                p_val = parent_raw_dict.get(key, '')
+                v_val = variant_raw_dict.get(key, '')
                 
                 # Если значения разные и у варианта есть значение
                 if v_val and p_val != v_val:
@@ -347,7 +363,8 @@ class AttributeNormalizer:
                     logger.debug(f"📦 Найден набор для {prod.product_id}")
                 else:
                     # 2. Поиск цифр в SKU, отличающихся от родителя
-                    if prod.parent_product_id and parent.sku:
+                    # Проверяем только для вариантов (у них есть parent_product_id)
+                    if isinstance(prod, ProductVariant) and prod.parent_product_id and parent.sku:
                         parent_numbers = set(re.findall(r'\d+', parent.sku or ""))
                         current_numbers = set(re.findall(r'\d+', prod.sku or ""))
                         diff_numbers = current_numbers - parent_numbers
