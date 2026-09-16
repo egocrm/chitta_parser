@@ -183,13 +183,21 @@ class OllamaEnricher:
 
     async def generate(self, prompt: str) -> Dict[str, Any]:
         """Публичный метод для вызова LLM с возвратом распарсенного JSON."""
+        logger.info(f"🤖 [OLLAMA GENERATE] Вызов модели {self.model_name}...")
         raw_json = await self._call_ollama_raw(prompt)
+        
         if not raw_json:
+            logger.warning("⚠️ [OLLAMA GENERATE] Пустой ответ от модели")
             return {}
+        
+        logger.debug(f"📥 [OLLAMA RAW] Сырой ответ: {raw_json[:200]}...")
+        
         try:
-            return json.loads(raw_json)
-        except json.JSONDecodeError:
-            logger.error(f"❌ [OLLAMA GENERATE] Ошибка парсинга JSON ответа!")
+            result = json.loads(raw_json)
+            logger.info(f"✅ [OLLAMA GENERATE] JSON успешно распарсен. Ключи: {list(result.keys())}")
+            return result
+        except json.JSONDecodeError as e:
+            logger.error(f"❌ [OLLAMA GENERATE] Ошибка парсинга JSON ответа! Текст: {raw_json[:100]}... Ошибка: {e}")
             return {}
 
     def _normalize_extracted_attributes(self, data: dict) -> Dict[str, str]:
