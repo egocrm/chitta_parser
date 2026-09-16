@@ -17,7 +17,13 @@ venv/
 .env.local
 *.env.*
 
-# Editors
+# Data
+output_csv/
+
+# Logs
+*.log
+
+# Editor/IDE files
 .vscode/
 .idea/
 
