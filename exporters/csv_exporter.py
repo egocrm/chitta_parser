@@ -89,16 +89,26 @@ class CSVExporter:
         return sorted(list(extra_keys), key=sort_key)        
 
     def _get_all_attribute_keys(self, parents: List[ProductParent]) -> List[str]:
-        """Собирает все уникальные ключи динамических атрибутов, очищая их от двойных префиксов."""
+        """Собирает все уникальные ключи динамических атрибутов из attributes И modification_attributes, очищая их от префиксов."""
         attr_keys: Set[str] = set()
         for parent in parents:
+            # Собираем из attributes
             for k in parent.attributes.keys():
-                # Удаляем ведущий 'attr_' если он уже есть, чтобы нормализовать имя
                 clean_k = k[5:] if k.startswith("attr_") else k
                 attr_keys.add(clean_k)
+            # Собираем из modification_attributes
+            for k in parent.modification_attributes.keys():
+                clean_k = k[13:] if k.startswith("modification_") else k
+                attr_keys.add(clean_k)
+                
             for variant in parent.variants:
+                # Собираем из attributes варианта
                 for k in variant.attributes.keys():
                     clean_k = k[5:] if k.startswith("attr_") else k
+                    attr_keys.add(clean_k)
+                # Собираем из modification_attributes варианта
+                for k in variant.modification_attributes.keys():
+                    clean_k = k[13:] if k.startswith("modification_") else k
                     attr_keys.add(clean_k)
         return sorted(list(attr_keys))
 
@@ -158,11 +168,16 @@ class CSVExporter:
                         self._clean_text(v.brand_name), self._clean_text(v.manufacturer), self._clean_text(v.country_of_origin)
                     ]
                     for attr in dynamic_attrs:
+                        # Приоритет: свои атрибуты варианта -> свои modification_attributes -> атрибуты родителя
                         val = (
                             v.attributes.get(attr, "") 
                             or v.attributes.get(f"attr_{attr}", "") 
+                            or v.modification_attributes.get(attr, "") 
+                            or v.modification_attributes.get(f"modification_{attr}", "") 
                             or p.attributes.get(attr, "") 
                             or p.attributes.get(f"attr_{attr}", "")
+                            or p.modification_attributes.get(attr, "") 
+                            or p.modification_attributes.get(f"modification_{attr}", "") 
                         )
                         v_row.append(self._clean_text(val))
                     writer.writerow(v_row)
