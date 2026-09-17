@@ -21,6 +21,27 @@ class FastSelectorParser:
         self.category_extractor = CategoryExtractor()
 
     @staticmethod
+    def _sanitize_selector(sel: str) -> str:
+        """
+        Очищает селекторы от jQuery-специфичных псевдоклассов (:contains, :text-is), 
+        которые вызывают краш нативного document.querySelectorAll в браузере.
+        Превращает их в валидный стандартный CSS, сохраняя область поиска.
+        """
+        if not sel:
+            return ""
+        
+        # 1. Полностью удаляем :contains("..."), :text-is("..."), :text("...")
+        # Это превращает 'div:has(span:contains("foo"))' в валидный CSS 'div:has(span)'
+        sel = re.sub(r':contains\s*\([^)]*\)', '', sel, flags=re.IGNORECASE)
+        sel = re.sub(r':text-is\s*\([^)]*\)', '', sel, flags=re.IGNORECASE)
+        sel = re.sub(r':text\s*\([^)]*\)', '', sel, flags=re.IGNORECASE)
+        
+        # 2. Убираем лишние пробелы перед закрывающими скобками, если они образовались после вырезки
+        sel = re.sub(r'\s+\)', ')', sel)
+        
+        return sel.strip()       
+
+    @staticmethod
     def _clean_text(text: str) -> str:
         if not text:
             return ""
@@ -466,18 +487,17 @@ class FastSelectorParser:
 
     async def _build_variant_combinations(self, page: Page, url: str, variant_selectors: Dict[str, Any]) -> List[Dict[str, Any]]:
         """
-        Строит декартово произведение всех вариантов из multiple групп.
-        Извлекает href для каждого варианта и возвращает список комбинаций.
-        Каждая комбинация: {"combination": {"color": "red", "size": "L"}, "href": "...", "variant_id": "..."}
+        Универсально строит декартово произведение всех вариантов из multiple групп.
+        Поддерживает: <select>, <input type="radio">, кликабельные <a> и <button>.
+        Возвращает список комбинаций: {"combination": {"color": "red", "size": "L"}, "href": "...", "dom_values": {...}}
         """
         from itertools import product
         
         groups_data = {}
         
-        # Шаг 1: Собираем все возможные значения для каждой группы
         for group_name, group_cfg in variant_selectors.items():
-            container = str(group_cfg.get("container", "")).strip()
-            item = str(group_cfg.get("item", "")).strip()
+            container = self._sanitize_selector(str(group_cfg.get("container", "")).strip())
+            item = self._sanitize_selector(str(group_cfg.get("item", "")).strip())
             value_attr = str(group_cfg.get("value_attr", "title")).strip()
             
             if not container or not item:
@@ -486,33 +506,43 @@ class FastSelectorParser:
             values_list = []
             
             try:
-                # Объединяем контейнер и item в полный селектор
-                if item.startswith(container):
-                    full_item_sel = item
-                else:
-                    full_item_sel = f"{container} {item}"
-                
+                # Формируем полный селектор элемента
+                full_item_sel = item if item.startswith(container) else f"{container} {item}"
                 items_locator = page.locator(full_item_sel)
                 item_count = await items_locator.count()
                 
                 for i in range(item_count):
                     item_el = items_locator.nth(i)
                     
-                    # Извлекаем значение
+                    # 1. Извлекаем текстовое значение
                     val_text = await item_el.get_attribute(value_attr)
                     if not val_text:
                         val_text = await item_el.inner_text()
                     val_text = self._clean_text(val_text) if val_text else f"option_{i+1}"
                     
-                    # Извлекаем href (для перехода на страницу варианта)
+                    # 2. Извлекаем URL (href или value в случае <option>)
                     href = await item_el.get_attribute("href")
-                    if not href:
-                        # Пытаемся найти href во вложенном элементе a
-                        link_el = item_el.locator("a").first
-                        if await link_el.count() > 0:
-                            href = await link_el.get_attribute("href")
                     
-                    # Извлекаем ID варианта
+                    # Если href нет у самого элемента, ищем вложенный <a>
+                    if not href:
+                        nested_link = item_el.locator("a[href]").first
+                        if await nested_link.count() > 0:
+                            href = await nested_link.get_attribute("href")
+                    
+                    # Если всё ещё нет — ищем соседний <a> (для PrestaShop: <input> рядом с <a>)
+                    if not href:
+                        try:
+                            sibling_link = item_el.locator("xpath=following-sibling::a[1] | xpath=preceding-sibling::a[1] | xpath=../a[1]").first
+                            if await sibling_link.count() > 0:
+                                href = await sibling_link.get_attribute("href")
+                        except Exception:
+                            pass
+                    
+                    # Fallback: для <option> в <select> URL часто в атрибуте value
+                    if not href:
+                        href = await item_el.get_attribute("value")
+                    
+                    # 3. Извлекаем системный ID варианта из DOM (data-id, value и т.д.)
                     variant_id = await item_el.get_attribute("data-value") or \
                                  await item_el.get_attribute("data-id") or \
                                  await item_el.get_attribute("value") or \
@@ -521,7 +551,7 @@ class FastSelectorParser:
                     values_list.append({
                         "value": val_text,
                         "href": href or "",
-                        "variant_id": str(variant_id)
+                        "variant_id": str(variant_id).strip()
                     })
                 
                 if values_list:
@@ -533,11 +563,10 @@ class FastSelectorParser:
         if not groups_data:
             return []
         
-        # Шаг 2: Строим декартово произведение
+        # Строим декартово произведение
         combinations = []
         group_names = list(groups_data.keys())
         
-        # Генерируем все комбинации значений
         for combo_values in product(*[groups_data[g] for g in group_names]):
             combination_dict = {}
             all_hrefs = []
@@ -550,8 +579,8 @@ class FastSelectorParser:
                     all_hrefs.append(value_data["href"])
                 all_ids.append(value_data["variant_id"])
             
-            # Приоритет href: используем первый найденный или строим URL главной страницы
-            final_href = all_hrefs[0] if all_hrefs else url
+            # Приоритет URL: берем первый найденный непустой
+            final_href = next((h for h in all_hrefs if h), "")
             
             combinations.append({
                 "combination": combination_dict,
@@ -560,6 +589,200 @@ class FastSelectorParser:
             })
         
         return combinations
+
+    async def _resolve_variant_data(
+        self, 
+        page: Page, 
+        base_url: str, 
+        combination: Dict[str, str], 
+        variant_selectors: Dict[str, Any],
+        selectors_map: Dict[str, Any] = None
+    ) -> Dict[str, Any]:
+        """
+        ИНТЕРАКТИВНЫЙ РЕЗОЛВЕР v5 (нативные DOM-события):
+        Использует dispatchEvent для эмуляции кликов, которые невозможно отличить от реальных.
+        Обходит все ограничения Playwright API.
+        """
+        result = {
+            "is_variant": False,
+            "product_id": "",
+            "url": base_url,
+            "price": 0.0,
+            "fact_price": 0.0
+        }
+
+        try:
+            # ШАГ 1: Интерактивный выбор каждой опции через нативные события
+            for group_name, target_value in combination.items():
+                cfg = variant_selectors.get(group_name, {})
+                # САНИТИЗАЦИЯ СЕЛЕКТОРОВ ПЕРЕД ИСПОЛЬЗОВАНИЕМ
+                container = self._sanitize_selector(str(cfg.get("container", "")).strip())
+                item = self._sanitize_selector(str(cfg.get("item", "")).strip())
+                
+                if not container or not item:
+                    continue
+                
+                # Используем page.evaluate для отправки нативных событий
+                clicked = await page.evaluate("""
+                    (args) => {
+                        const containerSel = args[0];
+                        const itemSel = args[1];
+                        const targetValue = args[2];
+                        
+                        const clean = (str) => (str || '').replace(/\s+/g, ' ').trim().toLowerCase();
+                        const targetClean = clean(targetValue);
+                        
+                        // Находим все элементы-кандидаты
+                        const container = document.querySelector(containerSel);
+                        if (!container) return false;
+                        
+                        const items = container.querySelectorAll(itemSel);
+                        let found = false;
+                        
+                        for (const item of items) {
+                            // Проверяем текст элемента или атрибут title/value
+                            const text = clean(item.textContent || item.getAttribute('title') || item.getAttribute('value') || '');
+                            
+                            if (text === targetClean || text.includes(targetClean)) {
+                                // Определяем тип элемента
+                                if (item.tagName === 'OPTION') {
+                                    // Для <option> меняем selectedIndex родителя и триггерим change
+                                    const select = item.closest('select');
+                                    if (select) {
+                                        select.value = item.value;
+                                        select.dispatchEvent(new Event('change', { bubbles: true }));
+                                        found = true;
+                                        break;
+                                    }
+                                } else if (item.type === 'radio' || item.type === 'checkbox') {
+                                    // Для радио/чекбоксов триггерим click
+                                    item.checked = true;
+                                    item.dispatchEvent(new Event('change', { bubbles: true }));
+                                    item.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+                                    found = true;
+                                    break;
+                                } else {
+                                    // Для обычных элементов (кнопки, ссылки, label) отправляем полную последовательность
+                                    const rect = item.getBoundingClientRect();
+                                    const x = rect.left + rect.width / 2;
+                                    const y = rect.top + rect.height / 2;
+                                    
+                                    item.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, clientX: x, clientY: y }));
+                                    item.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true, clientX: x, clientY: y }));
+                                    item.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, clientX: x, clientY: y }));
+                                    found = true;
+                                    break;
+                                }
+                            }
+                        }
+                        
+                        // Если не нашли по тексту, пробуем найти по label (для PrestaShop)
+                        if (!found) {
+                            const labels = document.querySelectorAll('label');
+                            for (const label of labels) {
+                                if (clean(label.textContent) === targetClean) {
+                                    const input = label.querySelector('input') || label.previousElementSibling || label.nextElementSibling;
+                                    if (input) {
+                                        if (input.type === 'radio' || input.type === 'checkbox') {
+                                            input.checked = true;
+                                            input.dispatchEvent(new Event('change', { bubbles: true }));
+                                            input.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+                                            found = true;
+                                            break;
+                                        } else {
+                                            input.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+                                            found = true;
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        
+                        return found;
+                    }
+                """, [container, item, target_value])
+                
+                if clicked:
+                    await page.wait_for_timeout(1500) # Ждём, пока сайт обработает событие (AJAX/редирект)
+                else:
+                    logger.warning(f"⚠️ [RESOLVER] Не удалось кликнуть по '{target_value}' в группе '{group_name}'")
+
+            # ШАГ 2: Оцениваем результат
+            current_url = page.url
+            
+            if current_url != base_url and current_url.startswith("http"):
+                result["is_variant"] = True
+                result["url"] = current_url
+                logger.debug(f"🔄 [RESOLVER] URL изменился после выбора: {current_url}")
+
+            # ШАГ 3: Считываем ID
+            llm_sel = selectors_map.get("product_id_element", "") if selectors_map else ""
+            llm_attr = selectors_map.get("product_id_attr", "value") if selectors_map else "value"
+            
+            extracted_id = ""
+            if llm_sel:
+                try:
+                    locator = page.locator(llm_sel).first
+                    if await locator.count() > 0:
+                        val = await locator.get_attribute(llm_attr, timeout=2000) if llm_attr != "text" else await locator.inner_text(timeout=2000)
+                        if val and str(val).strip() and str(val).strip() != "0":
+                            extracted_id = str(val).strip()
+                except Exception:
+                    pass
+
+            # Fallback: ищем специфичные ID вариантов
+            if not extracted_id:
+                generic_id = await page.evaluate("""
+                    () => {
+                        const candidates = [
+                            'input[name="id_product_attribute"]',
+                            'input[name="variation_id"]',
+                            'input[name="id_product_attribute_id"]'
+                        ];
+                        for (const sel of candidates) {
+                            const el = document.querySelector(sel);
+                            if (el && el.value && el.value.trim() && el.value.trim() !== '0') {
+                                return 'attr_' + el.value.trim();
+                            }
+                        }
+                        return '';
+                    }
+                """)
+                if generic_id:
+                    extracted_id = generic_id
+
+            if extracted_id:
+                result["is_variant"] = True
+                result["product_id"] = extracted_id
+                result["url"] = current_url
+
+                # Считываем цену
+                try:
+                    price_text = await page.locator('[itemprop="price"], .current-price, .product-price').first.inner_text(timeout=2000)
+                    parsed = self._parse_price(price_text)
+                    if parsed > 0:
+                        result["fact_price"] = parsed
+                        result["price"] = parsed
+                except Exception:
+                    pass
+                
+                logger.info(f"✅ [RESOLVER NATIVE] Успешно выбрано: {combination}. ID: {result['product_id']}")
+                return result
+
+        except Exception as e:
+            logger.warning(f"⚠️ [RESOLVER NATIVE] Ошибка: {e}")
+        finally:
+            # Возвращаем страницу в исходное состояние
+            try:
+                if page.url != base_url:
+                    await page.goto(base_url, timeout=10000, wait_until="domcontentloaded")
+                    await page.wait_for_timeout(1000)
+            except Exception:
+                pass
+
+        logger.debug(f"ℹ️ [RESOLVER] После взаимодействия ID не появился для {combination}. Считается модификацией.")
+        return result
 
     async def _parse_multi_group_variants(
         self,
@@ -579,157 +802,161 @@ class FastSelectorParser:
         extra_product_ids: List[str]
     ):
         """
-        Обрабатывает варианты с множественными группами (например, цвет + размер).
-        1. Захватывает активные значения модификаций на главной странице
-        2. Строит декартово произведение всех комбинаций
-        3. Переходит на страницу каждого варианта для сбора актуальных данных
+        Обрабатывает варианты с множественными группами.
+        Теперь корректно передает target_href в резолвер для прямого перехода.
         """
-        from playwright.async_api import TimeoutError as PlaywrightTimeoutError
-        
-        # Шаг 1: Захватываем активные значения модификаций на текущей странице
-        active_mods = await self._capture_active_modifications(page, variant_selectors, url)
-        
-        # Сохраняем захваченные модификации в родительский товар
-        for group_name, value in active_mods.items():
-            parent.modification_attributes[group_name] = value
-        
-        logger.info(f"📋 [MULTI-GROUP VARIANTS] Захвачены активные модификации: {active_mods}")
-        
-        # Шаг 2: Строим все комбинации вариантов
         combinations = await self._build_variant_combinations(page, url, variant_selectors)
         
         if not combinations:
-            logger.warning(f"⚠️ [MULTI-GROUP VARIANTS] Не найдено комбинаций для товара {product_id}")
+            logger.warning(f"⚠️ [MULTI-GROUP] Не найдено комбинаций для товара {product_id}")
             return
         
-        logger.info(f"📊 [MULTI-GROUP VARIANTS] Найдено {len(combinations)} комбинаций вариантов")
+        logger.info(f"📊 [MULTI-GROUP] Найдено {len(combinations)} комбинаций для анализа")
         
-        # Шаг 3: Обрабатываем каждую комбинацию
         for combo_idx, combo_data in enumerate(combinations, 1):
             combination = combo_data["combination"]
-            variant_href = combo_data["href"]
-            variant_ids = combo_data["variant_ids"]
+            target_href = combo_data.get("href", "") # <-- ИЗВЛЕКАЕМ URL, который мы уже нашли
             
-            # Абсолютизируем URL
-            variant_url = self._make_absolute_url(variant_href, url) if variant_href else url
+            resolved = await self._resolve_variant_data(
+                page, 
+                url, 
+                combination, 
+                variant_selectors, 
+                self.selectors_map  # <--- ПЕРЕДАЁМ СЛОВАРЬ, А НЕ СТРОКУ
+            )
             
-            # Формируем title варианта
-            mod_parts = [f"{k}: {v}" for k, v in combination.items()]
-            variant_title = f"{base_title} ({', '.join(mod_parts)})" if mod_parts else base_title
-            
-            # Генерируем SKU и ID варианта
-            variant_id = "_".join(variant_ids) if variant_ids else f"{product_id}_var{combo_idx}"
-            variant_sku = f"{base_sku}_{'-'.join(str(v) for v in combination.values())}" if base_sku else variant_id
-            
-            try:
-                # Инициализируем переменные перед переходом
-                fact_price = base_price
-                old_price = base_old_price
-                available = base_available
-                currency = base_currency
-                real_product_id = None
-                
-                # Если URL варианта отличается от текущего, переходим на него
-                if variant_url != url and variant_url.startswith("http"):
-                    logger.debug(f"🔗 [VARIANT {combo_idx}/{len(combinations)}] Переход на страницу варианта: {variant_url}")
-                    
-                    # Открываем новую вкладку или переходим на страницу
-                    await page.goto(variant_url, timeout=30000, wait_until="networkidle")
-                    
-                    # Явно ждем появления элемента product_id перед попыткой чтения
-                    if self.selectors_map and self.selectors_map.get("product_id_element"):
-                        try:
-                            pid_selector = self.selectors_map["product_id_element"]
-                            logger.debug(f"⏳ [VARIANT {combo_idx}] Ожидание появления селектора: {pid_selector}")
-                            
-                            # Ждем до 10 секунд появления элемента
-                            await page.wait_for_selector(pid_selector, timeout=10000)
-                            
-                            pid_elem = await page.query_selector(pid_selector)
-                            if pid_elem:
-                                attr_name = self.selectors_map.get("product_id_attr", "value")
-                                if attr_name == "text":
-                                    real_product_id = await pid_elem.inner_text()
-                                else:
-                                    real_product_id = await pid_elem.get_attribute(attr_name)
-                                
-                                if real_product_id and str(real_product_id).strip():
-                                    # Пытаемся конвертировать в int, если это число
-                                    try:
-                                        real_product_id = int(str(real_product_id).strip())
-                                    except ValueError:
-                                        pass  # Оставляем как строку, если не число
-                                    
-                                    logger.debug(f"✅ [VARIANT {combo_idx}] Найден реальный product_id: {real_product_id}")
-                            else:
-                                logger.warning(f"⚠️ [VARIANT {combo_idx}] Элемент найден, но пустой")
-                        except PlaywrightTimeoutError:
-                            logger.error(f"❌ [VARIANT {combo_idx}] Таймаут ожидания селектора {self.selectors_map.get('product_id_element')} на странице варианта")
-                        except Exception as e:
-                            logger.warning(f"⚠️ [VARIANT {combo_idx}] Не удалось извлечь product_id: {e}")
-                    
-                    # Возвращаемся на основную страницу для следующей итерации
-                    logger.debug(f"↩️ [VARIANT {combo_idx}] Возврат на основную страницу: {url}")
-                    await page.goto(url, timeout=30000, wait_until="networkidle")
-                    await page.wait_for_timeout(1000)  # Даем время на стабилизацию DOM
-                else:
-                    # Если URL совпадает (редкий случай), пытаемся взять ID из текущей страницы
-                    if self.selectors_map and self.selectors_map.get("product_id_element"):
-                        try:
-                            pid_elem = await page.query_selector(self.selectors_map["product_id_element"])
-                            if pid_elem:
-                                attr_name = self.selectors_map.get("product_id_attr", "value")
-                                if attr_name == "text":
-                                    real_product_id = await pid_elem.inner_text()
-                                else:
-                                    real_product_id = await pid_elem.get_attribute(attr_name)
-                                if real_product_id and str(real_product_id).strip():
-                                    try:
-                                        real_product_id = int(str(real_product_id).strip())
-                                    except ValueError:
-                                        pass
-                        except Exception as e:
-                            logger.warning(f"⚠️ [VARIANT {combo_idx}] Ошибка чтения ID с текущей страницы: {e}")
-                
-                # Создаем объект варианта с реальным product_id, если он найден
-                # Если ID не найден - пропускаем этот вариант (критическая ошибка)
-                if not real_product_id:
-                    logger.error(f"❌ [VARIANT {combo_idx}] КРИТИЧЕСКАЯ ОШИБКА: Не найден product_id для {variant_url}. Вариант пропущен.")
-                    continue
+            if resolved["is_variant"] and resolved["product_id"] != product_id:
+                # --- ЭТО ВАРИАНТ ---
+                mod_parts = [f"{k}: {v}" for k, v in combination.items()]
+                variant_title = f"{base_title} ({', '.join(mod_parts)})" if mod_parts else base_title
+                variant_sku = f"{base_sku}_{'-'.join(str(v) for v in combination.values())}" if base_sku else resolved["product_id"]
                 
                 variant = ProductVariant(
-                    product_id=str(real_product_id),
+                    product_id=str(resolved["product_id"]),
                     parent_product_id=product_id,
                     sku=str(variant_sku).strip(),
                     parent_sku=base_sku,
                     title=variant_title,
                     description=parent.description,
-                    price=old_price,
-                    fact_price=fact_price,
-                    currency=currency,
-                    available=available,
+                    price=resolved["price"] or base_old_price,
+                    fact_price=resolved["fact_price"] or base_price,
+                    currency=base_currency,
+                    available=base_available,
                     image=base_image,
-                    product_link=variant_url,
+                    product_link=resolved["url"],
                     category_id=parent.category_id,
                     category_name=parent.category_name,
                     category_link=parent.category_link,
                     modification_attributes=combination.copy()
                 )
                 
-                # Проброс parent_id и альтернативных ID
                 variant.parent_id = product_id
                 for alt_idx, alt_id in enumerate(extra_product_ids, 1):
                     setattr(variant, f"parent_product_id_{alt_idx}", alt_id)
                 
                 state_machine.add_variant(product_id, variant)
-                logger.info(f"🔹 [VARIANT {combo_idx}] Добавлен вариант: {variant_title} (ID: {real_product_id}, SKU: {variant_sku})")
+                logger.info(f"🔹 [VARIANT {combo_idx}] Добавлен: {variant_title} (ID: {resolved['product_id']})")
                 
-            except PlaywrightTimeoutError as e:
-                logger.error(f"❌ [VARIANT {combo_idx}] Таймаут при переходе на {variant_url}: {e}. Вариант пропущен.")
-                continue
-            except Exception as e:
-                logger.error(f"❌ [VARIANT {combo_idx}] Ошибка обработки варианта {variant_url}: {e}. Вариант пропущен.")
-                continue
+            else:
+                # --- ЭТО МОДИФИКАЦИЯ ---
+                for key, val in combination.items():
+                    if key and val:
+                        parent.modification_attributes[key] = val
+                
+                logger.info(f"🏷️ [MODIFICATION {combo_idx}] Уникальный ID не найден. Атрибуты {combination} сохранены как модификации родителя.")
+
+    async def _parse_flat_variants(
+        self,
+        page: Page,
+        url: str,
+        parent: ProductParent,
+        state_machine: CatalogStateMachine,
+        var_cfg: Dict[str, Any],
+        base_title: str,
+        base_sku: str,
+        base_price: float,
+        base_old_price: float,
+        base_currency: str,
+        base_available: str,
+        base_image: str,
+        product_id: str,
+        extra_product_ids: List[str]
+    ):
+        """
+        Обрабатывает варианты с одной группой (плоский формат).
+        Также применяет строгую проверку на наличие реального ID перед созданием ProductVariant.
+        """
+        v_container = str(var_cfg.get("container", "")).strip()
+        v_group_name = str(var_cfg.get("group_name", "")).strip() or "option_1"
+        v_item = str(var_cfg.get("item", "")).strip()
+        v_val = str(var_cfg.get("value", "")).strip()
+        
+        if not v_container or not v_item:
+            return
+        
+        try:
+            full_item_sel = v_item if v_item.startswith(v_container) else f"{v_container} {v_item}"
+            items_locator = page.locator(full_item_sel)
+            item_count = await items_locator.count()
+            
+            rel_val_sel = v_val.replace(v_item, "").strip() if v_item in v_val else v_val
+            if not rel_val_sel:
+                rel_val_sel = v_val
+            
+            for i in range(item_count):
+                item_el = items_locator.nth(i)
+                val_text = ""
+                
+                if rel_val_sel:
+                    val_sub = item_el.locator(rel_val_sel).first
+                    if await val_sub.count() > 0:
+                        val_text = self._clean_text(await val_sub.inner_text())
+                
+                if not val_text:
+                    val_text = self._clean_text(await item_el.inner_text())
+                
+                v_href = await item_el.get_attribute("href") or await item_el.get_attribute("value") or ""
+                v_id_raw = await item_el.get_attribute("data-value") or await item_el.get_attribute("data-id") or ""
+                v_link = self._make_absolute_url(v_href, url) if v_href else url
+                
+                # СТРОГАЯ ПРОВЕРКА: Если нет ни URL, ни реального ID, это не вариант, а модификация
+                is_real_variant = bool(v_id_raw and str(v_id_raw).strip() and str(v_id_raw).strip() != product_id) or \
+                                  (v_link and v_link != url)
+                
+                if is_real_variant:
+                    # Это ВАРИАНТ
+                    variant = ProductVariant(
+                        product_id=str(v_id_raw).strip() or f"link_{hash(v_link) % 100000}",
+                        parent_product_id=product_id,
+                        sku=f"{base_sku}_{i+1}" if base_sku else str(v_id_raw),
+                        parent_sku=base_sku,
+                        title=f"{base_title} ({val_text})" if val_text else base_title,
+                        description=parent.description,
+                        price=base_old_price,
+                        fact_price=base_price,
+                        currency=base_currency,
+                        available=base_available,
+                        image=base_image,
+                        product_link=v_link,
+                        category_id=parent.category_id,
+                        category_name=parent.category_name,
+                        category_link=parent.category_link,
+                        modification_attributes={v_group_name: val_text}
+                    )
+                    
+                    variant.parent_id = product_id
+                    for alt_idx, alt_id in enumerate(extra_product_ids, 1):
+                        setattr(variant, f"parent_product_id_{alt_idx}", alt_id)
+                    
+                    state_machine.add_variant(product_id, variant)
+                    logger.info(f"🔹 [FLAT VARIANT] Добавлен: {variant.title} (ID: {variant.product_id})")
+                else:
+                    # Это МОДИФИКАЦИЯ
+                    parent.modification_attributes[v_group_name] = val_text
+                    logger.info(f"🏷️ [FLAT MODIFICATION] ID не найден. '{v_group_name}: {val_text}' сохранен как модификация родителя.")
+                    
+        except Exception as e:
+            logger.warning(f"⚠️ [FLAT VARIANTS] Ошибка сбора вариантов: {e}")
 
     async def _parse_single_group_variants(
         self,
@@ -1059,18 +1286,38 @@ class FastSelectorParser:
             if is_multi_group:
                 # Формат Gemini: multiple groups
                 await self._parse_multi_group_variants(
-                    page, url, parent, product_id, sku, title, 
-                    old_price, fact_price, currency, available, 
-                    main_img, cat_id, cat_name, cat_link, description,
-                    extra_product_ids, var_cfg
+                    page=page,
+                    url=url,
+                    parent=parent,
+                    state_machine=state_machine,  # <-- ПЕРЕДАЕМ ЯВНО
+                    variant_selectors=var_cfg,
+                    base_title=title,
+                    base_sku=sku,
+                    base_price=fact_price,
+                    base_old_price=old_price,
+                    base_currency=currency,
+                    base_available=available,
+                    base_image=main_img,
+                    product_id=product_id,
+                    extra_product_ids=extra_product_ids
                 )
             else:
                 # Старый плоский формат Ollama
                 await self._parse_flat_variants(
-                    page, url, parent, product_id, sku, title,
-                    old_price, fact_price, currency, available,
-                    main_img, cat_id, cat_name, cat_link, description,
-                    extra_product_ids, var_cfg
+                    page=page,
+                    url=url,
+                    parent=parent,
+                    state_machine=state_machine,  # <-- ПЕРЕДАЕМ ЯВНО
+                    var_cfg=var_cfg,
+                    base_title=title,
+                    base_sku=sku,
+                    base_price=fact_price,
+                    base_old_price=old_price,
+                    base_currency=currency,
+                    base_available=available,
+                    base_image=main_img,
+                    product_id=product_id,
+                    extra_product_ids=extra_product_ids
                 )
 
         logger.info(f"⚡ [FAST PARSER v2 DONE] Собраны данные для '{parent.title}' (ID: '{parent.product_id}')")
@@ -1117,252 +1364,3 @@ class FastSelectorParser:
                 logger.debug(f"⚠️ Не удалось захватить активное значение для {group_name}: {e}")
         
         return active_values
-
-    async def _parse_flat_variants(self, page, url, parent, product_id, sku, title, 
-                                   old_price, fact_price, currency, available,
-                                   main_img, cat_id, cat_name, cat_link, description,
-                                   extra_product_ids, var_cfg):
-        """Обработка плоского формата вариантов (Ollama-style)."""
-        from core.state_machine import CatalogStateMachine
-        state_machine = CatalogStateMachine.get_instance()
-        
-        v_container = str(var_cfg.get("container", "")).strip()
-        v_group_name = str(var_cfg.get("group_name", "")).strip()
-        v_item = str(var_cfg.get("item", "")).strip()
-        v_val = str(var_cfg.get("value", "")).strip()
-
-        if not v_container or not v_item:
-            return
-
-        try:
-            v_item_clean = v_item.strip()
-            v_container_clean = v_container.strip()
-            if v_item_clean.startswith(v_container_clean):
-                full_item_sel = v_item_clean
-            else:
-                full_item_sel = f"{v_container_clean} {v_item_clean}"
-            
-            items_locator = page.locator(full_item_sel)
-            item_count = await items_locator.count()
-
-            rel_val_sel = v_val.replace(v_item, "").strip() if v_item in v_val else v_val
-            if not rel_val_sel: rel_val_sel = v_val
-
-            for i in range(item_count):
-                item_el = items_locator.nth(i)
-                val_text = ""
-                if rel_val_sel:
-                    val_sub = item_el.locator(rel_val_sel).first
-                    if await val_sub.count() > 0:
-                        val_text = self._clean_text(await val_sub.inner_text())
-                if not val_text:
-                    val_text = self._clean_text(await item_el.inner_text())
-
-                group_name_text = "option_1"
-                if v_group_name:
-                    gn_el = page.locator(f"{v_container} {v_group_name}").first
-                    if await gn_el.count() > 0:
-                        raw_gn = self._clean_text(await gn_el.inner_text())
-                        if raw_gn and len(raw_gn) <= 30 and "\n" not in raw_gn:
-                            group_name_text = raw_gn
-                        else:
-                            group_name_text = "option_1"
-                    else:
-                        group_name_text = "option_1"
-
-                v_href = await item_el.get_attribute("href") or ""
-                v_id = await item_el.get_attribute("data-value") or await item_el.get_attribute("data-id") or f"{product_id}_{i+1}"
-                v_link = self._make_absolute_url(v_href, url) if v_href else url
-
-                v_mod_attrs = {group_name_text: val_text}
-                parent.modification_attributes[group_name_text] = ""
-
-                variant = ProductVariant(
-                    product_id=str(v_id).strip(),
-                    parent_product_id=product_id,
-                    sku=f"{sku}_{i+1}" if sku else str(v_id),
-                    parent_sku=sku,
-                    title=f"{title} ({val_text})" if val_text else title,
-                    description=description,
-                    price=old_price,
-                    fact_price=fact_price,
-                    currency=currency,
-                    available=available,
-                    image=main_img,
-                    product_link=v_link,
-                    category_id=cat_id,
-                    category_name=cat_name,
-                    category_link=cat_link,
-                    modification_attributes=v_mod_attrs
-                )
-                variant.parent_id = product_id
-                for alt_idx, alt_id in enumerate(extra_product_ids, 1):
-                    setattr(variant, f"parent_product_id_{alt_idx}", alt_id)
-
-                state_machine.add_variant(product_id, variant)
-        except Exception as e:
-            logger.warning(f"⚠️ [FAST PARSER v2] Ошибка сбора вариантов (flat): {e}")
-
-    async def _parse_multi_group_variants(self, page, url, parent, product_id, sku, title,
-                                          old_price, fact_price, currency, available,
-                                          main_img, cat_id, cat_name, cat_link, description,
-                                          extra_product_ids, var_cfg: dict):
-        """
-        Обработка мульти-группового формата (Gemini-style): {color: {...}, size: {...}}
-        1. Захватывает активные значения переключателей на главной странице
-        2. Строит декартово произведение всех комбинаций
-        3. Переходит на каждую страницу варианта для сбора цен/наличия
-        """
-        from core.state_machine import CatalogStateMachine
-        from itertools import product
-        state_machine = CatalogStateMachine.get_instance()
-        
-        # 1. Захват активных значений модификаций на текущей странице
-        active_mods = await self._capture_active_modifications(page, var_cfg, parent)
-        
-        # Сохраняем активные значения в parent.modification_attributes
-        for group_name, value in active_mods.items():
-            parent.modification_attributes[group_name] = value
-        
-        logger.info(f"📋 [MULTI-GROUP] Активные модификации: {active_mods}")
-        
-        # 2. Собираем все возможные значения для каждой группы
-        groups_data = {}
-        for group_name, cfg in var_cfg.items():
-            container = str(cfg.get("container", "")).strip()
-            item_sel = str(cfg.get("item", "")).strip()
-            value_attr = str(cfg.get("value_attr", "title")).strip()
-            
-            if not container or not item_sel:
-                continue
-            
-            try:
-                values_list = []
-                
-                # Определяем тип переключателя
-                if "select" in item_sel.lower() or "option" in item_sel.lower():
-                    # SELECT: читаем все options
-                    select_locator = page.locator(container).first
-                    if await select_locator.count() > 0:
-                        options = select_locator.locator("option")
-                        opt_count = await options.count()
-                        for j in range(opt_count):
-                            opt = options.nth(j)
-                            href = await opt.get_attribute("value")
-                            val = await opt.get_attribute(value_attr) or await opt.inner_text()
-                            if val:
-                                values_list.append({
-                                    "value": self._clean_text(val),
-                                    "href": href or "",
-                                    "group": group_name
-                                })
-                elif "radio" in item_sel or "input" in item_sel:
-                    # RADIO: читаем все label с inputs
-                    radio_items = page.locator(f"{container} label, {container} li").all()
-                    for item in await radio_items:
-                        try:
-                            input_el = item.locator("input[type='radio']").first
-                            anchor_el = item.locator("a.back-color, a[href]").first
-                            
-                            href = await anchor_el.get_attribute("href") if await anchor_el.count() > 0 else ""
-                            val = await input_el.get_attribute(value_attr) or await input_el.get_attribute("value")
-                            
-                            if val:
-                                values_list.append({
-                                    "value": self._clean_text(val),
-                                    "href": href or "",
-                                    "group": group_name
-                                })
-                        except:
-                            continue
-                else:
-                    # BUTTON/LINK: читаем все элементы
-                    items = page.locator(f"{container} {item_sel}").all()
-                    for item in await items:
-                        try:
-                            href = await item.get_attribute("href") or ""
-                            val = await item.get_attribute(value_attr) or await item.inner_text()
-                            if val:
-                                values_list.append({
-                                    "value": self._clean_text(val),
-                                    "href": href,
-                                    "group": group_name
-                                })
-                        except:
-                            continue
-                
-                if values_list:
-                    groups_data[group_name] = values_list
-            except Exception as e:
-                logger.warning(f"⚠️ Ошибка сбора значений для группы {group_name}: {e}")
-        
-        if not groups_data:
-            logger.warning("⚠️ [MULTI-GROUP] Не найдено групп вариантов")
-            return
-        
-        # 3. Строим декартово произведение всех комбинаций
-        group_names = list(groups_data.keys())
-        all_combinations = []
-        
-        # Получаем списки значений для каждой группы
-        value_lists = [groups_data[gn] for gn in group_names]
-        
-        # Декартово произведение
-        for combo in product(*value_lists):
-            combination = {}
-            full_href = None
-            
-            for i, item_data in enumerate(combo):
-                group = group_names[i]
-                combination[group] = item_data["value"]
-                
-                # Пытаемся найти URL для этой комбинации
-                # Приоритет: href из последнего элемента (обычно содержит полный URL варианта)
-                if item_data.get("href"):
-                    full_href = item_data["href"]
-            
-            all_combinations.append(combination)
-        
-        logger.info(f"🔢 [MULTI-GROUP] Найдено {len(all_combinations)} комбинаций вариантов")
-        
-        # 4. Для каждой комбинации создаём вариант и переходим на страницу
-        for idx, combo in enumerate(all_combinations):
-            # Формируем title варианта
-            variant_title_parts = [f"{combo.get(gn, '')}" for gn in group_names if combo.get(gn)]
-            variant_suffix = " - ".join(variant_title_parts) if variant_title_parts else f"variant_{idx+1}"
-            variant_title = f"{title} ({variant_suffix})"
-            
-            # Пытаемся построить URL
-            variant_url = url
-            # Если есть href из комбинации, используем его
-            # В реальном сценарии нужно искать URL по комбинации значений
-            
-            # Создаём вариант с данными из текущей страницы (без перехода)
-            # Для полноценного сбора нужно переходить на страницу каждого варианта
-            v_mod_attrs = dict(combo)
-            
-            variant = ProductVariant(
-                product_id=f"{product_id}_var{idx+1}",
-                parent_product_id=product_id,
-                sku=f"{sku}_{idx+1}" if sku else f"{product_id}_var{idx+1}",
-                parent_sku=sku,
-                title=variant_title,
-                description=description,
-                price=old_price,  # TODO: перейти на страницу и собрать актуальные
-                fact_price=fact_price,
-                currency=currency,
-                available=available,
-                image=main_img,
-                product_link=variant_url,
-                category_id=cat_id,
-                category_name=cat_name,
-                category_link=cat_link,
-                modification_attributes=v_mod_attrs
-            )
-            variant.parent_id = product_id
-            for alt_idx, alt_id in enumerate(extra_product_ids, 1):
-                setattr(variant, f"parent_product_id_{alt_idx}", alt_id)
-            
-            state_machine.add_variant(product_id, variant)
-        
-        logger.info(f"✅ [MULTI-GROUP] Добавлено {len(all_combinations)} вариантов")

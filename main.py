@@ -528,7 +528,15 @@ async def run_parser(
 
                         # 4. СОХРАНЕНИЕ И ДОБОР ИНТЕРАКТИВА (v1 DOM Swatches + Variants)
                         if parent_product and parent_product.product_id:
-                            state_machine.add_parent(parent_product)
+                            is_added = state_machine.add_parent(parent_product)
+
+                            if not is_added:
+                                # КЛЮЧЕВОЕ ИСПРАВЛЕНИЕ: Если add_parent вернул False (например, потому что 
+                                # этот URL ведет на вариант, который мы уже собрали ранее), мы НЕМЕДЛЕННО 
+                                # прерываем обработку этой ссылки. Это предотвращает попытки добавить 
+                                # "варианты" к несуществующему родителю и убирает дубликаты из CSV.
+                                logger.info(f"⏩ [SKIP URL] Ссылка {link} ведет на уже известный вариант (ID: {parent_product.product_id}). Данные уже собраны, пропускаем.")
+                                continue
 
                             # Проверяем, не был ли этот ID уже собран как вариант другого родительского товара
                             if parent_product.product_id in state_machine.registered_variant_ids:
