@@ -1,5 +1,5 @@
 # Python
-__pycache__/
+**/__pycache__/
 *.py[cod]
 *$py.class
 *.so
@@ -49,3 +49,6 @@ output_xml/
 # OS files
 .DS_Store
 Thumbs.db
+
+output_csv/
+

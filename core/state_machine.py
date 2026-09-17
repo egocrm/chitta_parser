@@ -53,22 +53,25 @@ class CatalogStateMachine:
         # logger.info(f"📂 [CATEGORY] Добавлена категория: {name} (ID: {cat_id_str})")
         return category
 
-    def add_parent(self, parent: ProductParent) -> bool:
+    def add_parent(self, parent: ProductParent, override_id: str = None) -> bool:
         """Добавляет родительский товар с проверкой лимита, наличия системного product_id и валидности фото."""
         if self.is_limit_reached():
             logger.warning(f"⚠️ [LIMIT] Достигнут лимит основных товаров ({self.max_parents}). Товар {parent.title} пропущен.")
             return False
 
-        if not parent.product_id:
+        # Используем override_id если предоставлен (для случаев когда product_id не найден)
+        pid = override_id if override_id else parent.product_id
+
+        if not pid:
             logger.warning(f"⚠️ [SKIP] Товар пропущен [{parent.product_link}]: не найден системный product_id в DOM/API.")
             return False
 
-        if parent.product_id in self.registered_variant_ids:
-            logger.info(f"⏩ [SKIP PARENT] ID {parent.product_id} уже зарегистрирован как дочерний вариант. Пропуск создания родителя.")
+        if pid in self.registered_variant_ids:
+            logger.info(f"⏩ [SKIP PARENT] ID {pid} уже зарегистрирован как дочерний вариант. Пропуск создания родителя.")
             return False
 
-        if parent.product_id in self.registered_product_ids:
-            logger.warning(f"⚠️ [PRODUCT_ID] Товар с product_id {parent.product_id} уже зарегистрирован.")
+        if pid in self.registered_product_ids:
+            logger.warning(f"⚠️ [PRODUCT_ID] Товар с product_id {pid} уже зарегистрирован.")
             return False
 
         # Валидация и фильтрация массива изображений (оставляем только корректные ссылки)
@@ -80,15 +83,15 @@ class CatalogStateMachine:
             if valid_parts:
                 parent.image = ", ".join(valid_parts)
             else:
-                logger.debug(f"⚠️ [MEDIA] У товара ID:{parent.product_id} некорректный URL фото ({parent.image}). Поле очищено.")
+                logger.debug(f"⚠️ [MEDIA] У товара ID:{pid} некорректный URL фото ({parent.image}). Поле очищено.")
                 parent.image = ""
 
         # Установка дефолтного наличия
         if parent.available == "yes" and parent.stock <= 0:
             parent.stock = 50
 
-        self.parents[parent.product_id] = parent
-        self.registered_product_ids.add(parent.product_id)
+        self.parents[pid] = parent
+        self.registered_product_ids.add(pid)
         return True
 
     def add_variant(self, parent_product_id: str, variant: ProductVariant) -> bool:
