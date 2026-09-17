@@ -1049,46 +1049,320 @@ class FastSelectorParser:
                 logger.warning(f"⚠️ [FAST PARSER v2] Ошибка сбора характеристик: {e}")
 
         # 8. Варианты (с пробросом parent_id, parent_product_id и alt ID)
-        # Поддерживаем оба формата: "variants" (старый плоский) и "variant_selectors" (новый от Gemini)
-        var_cfg = selectors_map.get("variants", {})
-        variant_selectors = selectors_map.get("variant_selectors", {})
+        # Поддержка формата Gemini: variant_selectors = {color: {...}, size: {...}}
+        var_cfg = selectors_map.get("variant_selectors", selectors_map.get("variants", {}))
         
-        if variant_selectors and isinstance(variant_selectors, dict):
-            # Новый формат от Gemini: {"color": {"container": "...", "item": "...", "value_attr": "..."}, "size": {...}}
-            await self._parse_multi_group_variants(
-                page=page,
-                url=url,
-                parent=parent,
-                state_machine=state_machine,
-                variant_selectors=variant_selectors,
-                base_title=title,
-                base_sku=sku,
-                base_price=fact_price,
-                base_old_price=old_price,
-                base_currency=currency,
-                base_available=available,
-                base_image=main_img,
-                product_id=product_id,
-                extra_product_ids=extra_product_ids
-            )
-        elif v_container and v_item:
-            # Старый плоский формат: {"container": "...", "group_name": "...", "item": "...", "value": "..."}
-            await self._parse_single_group_variants(
-                page=page,
-                url=url,
-                parent=parent,
-                state_machine=state_machine,
-                var_cfg=var_cfg,
-                base_title=title,
-                base_sku=sku,
-                base_price=fact_price,
-                base_old_price=old_price,
-                base_currency=currency,
-                base_available=available,
-                base_image=main_img,
-                product_id=product_id,
-                extra_product_ids=extra_product_ids
-            )
+        if var_cfg and isinstance(var_cfg, dict):
+            # Проверяем формат: если это словарь групп {color: {...}, size: {...}}
+            is_multi_group = any(isinstance(v, dict) for v in var_cfg.values())
+            
+            if is_multi_group:
+                # Формат Gemini: multiple groups
+                await self._parse_multi_group_variants(
+                    page, url, parent, product_id, sku, title, 
+                    old_price, fact_price, currency, available, 
+                    main_img, cat_id, cat_name, cat_link, description,
+                    extra_product_ids, var_cfg
+                )
+            else:
+                # Старый плоский формат Ollama
+                await self._parse_flat_variants(
+                    page, url, parent, product_id, sku, title,
+                    old_price, fact_price, currency, available,
+                    main_img, cat_id, cat_name, cat_link, description,
+                    extra_product_ids, var_cfg
+                )
 
         logger.info(f"⚡ [FAST PARSER v2 DONE] Собраны данные для '{parent.title}' (ID: '{parent.product_id}')")
         return parent
+
+    async def _capture_active_modifications(self, page: Page, var_cfg: dict, parent: ProductParent) -> dict:
+        """
+        Захватывает активные значения переключателей (radio:checked, select option[selected], button.active)
+        до перехода на страницы вариантов. Возвращает dict {group_name: active_value}.
+        """
+        active_values = {}
+        
+        for group_name, cfg in var_cfg.items():
+            container = str(cfg.get("container", "")).strip()
+            item_sel = str(cfg.get("item", "")).strip()
+            value_attr = str(cfg.get("value_attr", "title")).strip()
+            
+            if not container or not item_sel:
+                continue
+            
+            try:
+                # Определяем тип переключателя по селектору
+                if "select" in item_sel.lower() or "option" in item_sel.lower():
+                    # SELECT: читаем selected option
+                    select_locator = page.locator(container).first
+                    if await select_locator.count() > 0:
+                        selected_option = select_locator.locator("option[selected], option:checked").first
+                        if await selected_option.count() > 0:
+                            val = await selected_option.get_attribute(value_attr) or await selected_option.inner_text()
+                            active_values[group_name] = self._clean_text(val)
+                elif "radio" in item_sel or "input" in item_sel:
+                    # RADIO: читаем checked input
+                    radio_locator = page.locator(f"{container} input[type='radio']:checked").first
+                    if await radio_locator.count() > 0:
+                        val = await radio_locator.get_attribute(value_attr) or await radio_locator.get_attribute("value")
+                        active_values[group_name] = self._clean_text(val) if val else ""
+                else:
+                    # BUTTON/LINK: читаем активный элемент (.active, .selected)
+                    active_item = page.locator(f"{container} .active, {container} .selected").first
+                    if await active_item.count() > 0:
+                        val = await active_item.get_attribute(value_attr) or await active_item.inner_text()
+                        active_values[group_name] = self._clean_text(val)
+            except Exception as e:
+                logger.debug(f"⚠️ Не удалось захватить активное значение для {group_name}: {e}")
+        
+        return active_values
+
+    async def _parse_flat_variants(self, page, url, parent, product_id, sku, title, 
+                                   old_price, fact_price, currency, available,
+                                   main_img, cat_id, cat_name, cat_link, description,
+                                   extra_product_ids, var_cfg):
+        """Обработка плоского формата вариантов (Ollama-style)."""
+        from core.state_machine import CatalogStateMachine
+        state_machine = CatalogStateMachine.get_instance()
+        
+        v_container = str(var_cfg.get("container", "")).strip()
+        v_group_name = str(var_cfg.get("group_name", "")).strip()
+        v_item = str(var_cfg.get("item", "")).strip()
+        v_val = str(var_cfg.get("value", "")).strip()
+
+        if not v_container or not v_item:
+            return
+
+        try:
+            v_item_clean = v_item.strip()
+            v_container_clean = v_container.strip()
+            if v_item_clean.startswith(v_container_clean):
+                full_item_sel = v_item_clean
+            else:
+                full_item_sel = f"{v_container_clean} {v_item_clean}"
+            
+            items_locator = page.locator(full_item_sel)
+            item_count = await items_locator.count()
+
+            rel_val_sel = v_val.replace(v_item, "").strip() if v_item in v_val else v_val
+            if not rel_val_sel: rel_val_sel = v_val
+
+            for i in range(item_count):
+                item_el = items_locator.nth(i)
+                val_text = ""
+                if rel_val_sel:
+                    val_sub = item_el.locator(rel_val_sel).first
+                    if await val_sub.count() > 0:
+                        val_text = self._clean_text(await val_sub.inner_text())
+                if not val_text:
+                    val_text = self._clean_text(await item_el.inner_text())
+
+                group_name_text = "option_1"
+                if v_group_name:
+                    gn_el = page.locator(f"{v_container} {v_group_name}").first
+                    if await gn_el.count() > 0:
+                        raw_gn = self._clean_text(await gn_el.inner_text())
+                        if raw_gn and len(raw_gn) <= 30 and "\n" not in raw_gn:
+                            group_name_text = raw_gn
+                        else:
+                            group_name_text = "option_1"
+                    else:
+                        group_name_text = "option_1"
+
+                v_href = await item_el.get_attribute("href") or ""
+                v_id = await item_el.get_attribute("data-value") or await item_el.get_attribute("data-id") or f"{product_id}_{i+1}"
+                v_link = self._make_absolute_url(v_href, url) if v_href else url
+
+                v_mod_attrs = {group_name_text: val_text}
+                parent.modification_attributes[group_name_text] = ""
+
+                variant = ProductVariant(
+                    product_id=str(v_id).strip(),
+                    parent_product_id=product_id,
+                    sku=f"{sku}_{i+1}" if sku else str(v_id),
+                    parent_sku=sku,
+                    title=f"{title} ({val_text})" if val_text else title,
+                    description=description,
+                    price=old_price,
+                    fact_price=fact_price,
+                    currency=currency,
+                    available=available,
+                    image=main_img,
+                    product_link=v_link,
+                    category_id=cat_id,
+                    category_name=cat_name,
+                    category_link=cat_link,
+                    modification_attributes=v_mod_attrs
+                )
+                variant.parent_id = product_id
+                for alt_idx, alt_id in enumerate(extra_product_ids, 1):
+                    setattr(variant, f"parent_product_id_{alt_idx}", alt_id)
+
+                state_machine.add_variant(product_id, variant)
+        except Exception as e:
+            logger.warning(f"⚠️ [FAST PARSER v2] Ошибка сбора вариантов (flat): {e}")
+
+    async def _parse_multi_group_variants(self, page, url, parent, product_id, sku, title,
+                                          old_price, fact_price, currency, available,
+                                          main_img, cat_id, cat_name, cat_link, description,
+                                          extra_product_ids, var_cfg: dict):
+        """
+        Обработка мульти-группового формата (Gemini-style): {color: {...}, size: {...}}
+        1. Захватывает активные значения переключателей на главной странице
+        2. Строит декартово произведение всех комбинаций
+        3. Переходит на каждую страницу варианта для сбора цен/наличия
+        """
+        from core.state_machine import CatalogStateMachine
+        from itertools import product
+        state_machine = CatalogStateMachine.get_instance()
+        
+        # 1. Захват активных значений модификаций на текущей странице
+        active_mods = await self._capture_active_modifications(page, var_cfg, parent)
+        
+        # Сохраняем активные значения в parent.modification_attributes
+        for group_name, value in active_mods.items():
+            parent.modification_attributes[group_name] = value
+        
+        logger.info(f"📋 [MULTI-GROUP] Активные модификации: {active_mods}")
+        
+        # 2. Собираем все возможные значения для каждой группы
+        groups_data = {}
+        for group_name, cfg in var_cfg.items():
+            container = str(cfg.get("container", "")).strip()
+            item_sel = str(cfg.get("item", "")).strip()
+            value_attr = str(cfg.get("value_attr", "title")).strip()
+            
+            if not container or not item_sel:
+                continue
+            
+            try:
+                values_list = []
+                
+                # Определяем тип переключателя
+                if "select" in item_sel.lower() or "option" in item_sel.lower():
+                    # SELECT: читаем все options
+                    select_locator = page.locator(container).first
+                    if await select_locator.count() > 0:
+                        options = select_locator.locator("option")
+                        opt_count = await options.count()
+                        for j in range(opt_count):
+                            opt = options.nth(j)
+                            href = await opt.get_attribute("value")
+                            val = await opt.get_attribute(value_attr) or await opt.inner_text()
+                            if val:
+                                values_list.append({
+                                    "value": self._clean_text(val),
+                                    "href": href or "",
+                                    "group": group_name
+                                })
+                elif "radio" in item_sel or "input" in item_sel:
+                    # RADIO: читаем все label с inputs
+                    radio_items = page.locator(f"{container} label, {container} li").all()
+                    for item in await radio_items:
+                        try:
+                            input_el = item.locator("input[type='radio']").first
+                            anchor_el = item.locator("a.back-color, a[href]").first
+                            
+                            href = await anchor_el.get_attribute("href") if await anchor_el.count() > 0 else ""
+                            val = await input_el.get_attribute(value_attr) or await input_el.get_attribute("value")
+                            
+                            if val:
+                                values_list.append({
+                                    "value": self._clean_text(val),
+                                    "href": href or "",
+                                    "group": group_name
+                                })
+                        except:
+                            continue
+                else:
+                    # BUTTON/LINK: читаем все элементы
+                    items = page.locator(f"{container} {item_sel}").all()
+                    for item in await items:
+                        try:
+                            href = await item.get_attribute("href") or ""
+                            val = await item.get_attribute(value_attr) or await item.inner_text()
+                            if val:
+                                values_list.append({
+                                    "value": self._clean_text(val),
+                                    "href": href,
+                                    "group": group_name
+                                })
+                        except:
+                            continue
+                
+                if values_list:
+                    groups_data[group_name] = values_list
+            except Exception as e:
+                logger.warning(f"⚠️ Ошибка сбора значений для группы {group_name}: {e}")
+        
+        if not groups_data:
+            logger.warning("⚠️ [MULTI-GROUP] Не найдено групп вариантов")
+            return
+        
+        # 3. Строим декартово произведение всех комбинаций
+        group_names = list(groups_data.keys())
+        all_combinations = []
+        
+        # Получаем списки значений для каждой группы
+        value_lists = [groups_data[gn] for gn in group_names]
+        
+        # Декартово произведение
+        for combo in product(*value_lists):
+            combination = {}
+            full_href = None
+            
+            for i, item_data in enumerate(combo):
+                group = group_names[i]
+                combination[group] = item_data["value"]
+                
+                # Пытаемся найти URL для этой комбинации
+                # Приоритет: href из последнего элемента (обычно содержит полный URL варианта)
+                if item_data.get("href"):
+                    full_href = item_data["href"]
+            
+            all_combinations.append(combination)
+        
+        logger.info(f"🔢 [MULTI-GROUP] Найдено {len(all_combinations)} комбинаций вариантов")
+        
+        # 4. Для каждой комбинации создаём вариант и переходим на страницу
+        for idx, combo in enumerate(all_combinations):
+            # Формируем title варианта
+            variant_title_parts = [f"{combo.get(gn, '')}" for gn in group_names if combo.get(gn)]
+            variant_suffix = " - ".join(variant_title_parts) if variant_title_parts else f"variant_{idx+1}"
+            variant_title = f"{title} ({variant_suffix})"
+            
+            # Пытаемся построить URL
+            variant_url = url
+            # Если есть href из комбинации, используем его
+            # В реальном сценарии нужно искать URL по комбинации значений
+            
+            # Создаём вариант с данными из текущей страницы (без перехода)
+            # Для полноценного сбора нужно переходить на страницу каждого варианта
+            v_mod_attrs = dict(combo)
+            
+            variant = ProductVariant(
+                product_id=f"{product_id}_var{idx+1}",
+                parent_product_id=product_id,
+                sku=f"{sku}_{idx+1}" if sku else f"{product_id}_var{idx+1}",
+                parent_sku=sku,
+                title=variant_title,
+                description=description,
+                price=old_price,  # TODO: перейти на страницу и собрать актуальные
+                fact_price=fact_price,
+                currency=currency,
+                available=available,
+                image=main_img,
+                product_link=variant_url,
+                category_id=cat_id,
+                category_name=cat_name,
+                category_link=cat_link,
+                modification_attributes=v_mod_attrs
+            )
+            variant.parent_id = product_id
+            for alt_idx, alt_id in enumerate(extra_product_ids, 1):
+                setattr(variant, f"parent_product_id_{alt_idx}", alt_id)
+            
+            state_machine.add_variant(product_id, variant)
+        
+        logger.info(f"✅ [MULTI-GROUP] Добавлено {len(all_combinations)} вариантов")

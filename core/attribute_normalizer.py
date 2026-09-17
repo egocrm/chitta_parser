@@ -50,6 +50,7 @@ class AttributeNormalizer:
             if llm_response:
                 # Шаг 4: Парсинг ответа и применение результатов
                 self._apply_llm_results(parent, llm_response)
+                self._detect_modifications_by_diff(parent)
             else:
                 # Фолбэк: простая эвристика без LLM
                 self._apply_heuristic_normalization(parent)
@@ -246,6 +247,73 @@ class AttributeNormalizer:
                 logger.warning(f"⚠️ [LLM APPLY] Не найден вариант для ключа LLM '{llm_key}'. Доступные IDs: {list(variant_id_map.keys())}")
         
         logger.info(f"✅ [LLM APPLY] Всего применено {applied_count} модификаций к вариантам")
+
+    def _detect_modifications_by_diff(self, parent: ProductParent) -> None:
+        """
+        Выявляет модификации путем прямого сравнения данных родителя и вариантов.
+        Игнорирует ответ LLM, если найдены явные различия в ключевых полях.
+        """
+        logger.info(f"🔍 [HEURISTIC] Запуск сравнения для {len(parent.variants)} вариантов...")
+        
+        # Ключи для проверки на отличия
+        check_keys = ['color', 'size', 'volume', 'weight', 'memory', 'power']
+        
+        # Конвертируем raw_attributes родителя в словарь для удобного доступа
+        # raw_attributes - это список словарей [{name: value}, ...] или [{value: ""}, ...]
+        parent_raw_dict = {}
+        for item in parent.raw_attributes or []:
+            if isinstance(item, dict):
+                if item:  # не пустой словарь
+                    key = list(item.keys())[0]
+                    val = item[key]
+                    parent_raw_dict[str(key).lower()] = str(val).lower()
+        
+        for variant in parent.variants:
+            found_mods = {}
+            
+            # Конвертируем raw_attributes варианта в словарь
+            variant_raw_dict = {}
+            for item in variant.raw_attributes or []:
+                if isinstance(item, dict):
+                    if item:
+                        key = list(item.keys())[0]
+                        val = item[key]
+                        variant_raw_dict[str(key).lower()] = str(val).lower()
+            
+            # 1. Сравнение сырых атрибутов (raw_attributes)
+            for key in check_keys:
+                p_val = parent_raw_dict.get(key, '')
+                v_val = variant_raw_dict.get(key, '')
+                
+                # Если значения разные и у варианта есть значение
+                if v_val and p_val != v_val:
+                    found_mods[key] = v_val
+                    logger.debug(f"   - Найдено отличие по '{key}': {p_val} -> {v_val}")
+            
+            # 2. Эвристика по SKU и Названию (если атрибуты не найдены)
+            if not found_mods:
+                # Цвет
+                colors = ['black', 'white', 'red', 'blue', 'green', 'olive', 'pink', 'tiffany', 'gold', 'silver', 'champagne', 'violet']
+                for c in colors:
+                    if c in variant.sku.lower() or c in variant.title.lower():
+                        if c not in parent.sku.lower() and c not in parent.title.lower():
+                            found_mods['color'] = c
+                            break
+                
+                # Размер (цифры в SKU)
+                import re
+                nums = re.findall(r'\d{2,3}', variant.sku)
+                for n in nums:
+                    if n not in parent.sku:
+                        found_mods['size'] = n
+                        break
+            
+            # Запись найденных модификаций
+            if found_mods:
+                variant.modification_attributes.update(found_mods)
+                logger.info(f"✅ [HEURISTIC] Для варианта {variant.product_id} найдены модификации: {found_mods}")
+            else:
+                logger.warning(f"⚠️ [HEURISTIC] Для варианта {variant.product_id} отличий не найдено.")        
     
     def _apply_heuristic_normalization(self, parent: ProductParent) -> None:
         """
@@ -312,7 +380,8 @@ class AttributeNormalizer:
                     logger.debug(f"📦 Найден набор для {prod.product_id}")
                 else:
                     # 2. Поиск цифр в SKU, отличающихся от родителя
-                    if prod.parent_product_id and parent.sku:
+                    # Проверяем только для вариантов (у них есть parent_product_id)
+                    if isinstance(prod, ProductVariant) and prod.parent_product_id and parent.sku:
                         parent_numbers = set(re.findall(r'\d+', parent.sku or ""))
                         current_numbers = set(re.findall(r'\d+', prod.sku or ""))
                         diff_numbers = current_numbers - parent_numbers
