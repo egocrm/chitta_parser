@@ -604,11 +604,11 @@ async def run_parser(
     all_parents = state_machine.get_all_parents()
     total = len(all_parents)
 
-    # === ФАЗА ДВУХПРОХОДНОЙ ОЧИСТКИ GEMINI ===
+    # === ФАЗА ОЧИСТКИ ЧЕРЕЗ OLLAMA (вместо Gemini) ===
     if total > 0:
-        # ПРОХОД 1: Очистка скаляров пачками по 50 штук
-        logger.info(f"🧹 [GEMINI PASS 1] Запуск быстрой очистки скаляров для {total} товаров пачками по 30 шт...")
-        scalar_batch_size = 30
+        # ПРОХОД 1: Очистка скаляров пачками по 10 штук через Ollama
+        logger.info(f"🧹 [OLLAMA PASS 1] Запуск быстрой очистки скаляров для {total} товаров пачками по 10 шт...")
+        scalar_batch_size = 10
 
         for i in range(0, total, scalar_batch_size):
             chunk = all_parents[i:i + scalar_batch_size]
@@ -644,8 +644,8 @@ async def run_parser(
                     if cdata.get("currency"): p.currency = str(cdata["currency"]).strip()
                     if cdata.get("available"): p.available = str(cdata["available"]).strip()
 
-        # ПРОХОД 2: Очистка характеристик — передаем Gemini только список уникальных сырых ключей
-        logger.info("🧠 [GEMINI PASS 2] Очистка характеристик на эталонных ключах...")
+        # ПРОХОД 2: Очистка характеристик через Ollama — передаем только список уникальных сырых ключей
+        logger.info("🧠 [OLLAMA PASS 2] Очистка характеристик на эталонных ключах...")
         raw_keys = set()
         for p in all_parents:
             if hasattr(p, "attributes") and isinstance(p.attributes, dict):

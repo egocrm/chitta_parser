@@ -83,7 +83,7 @@ class AttributeNormalizer:
         return result
     
     def _build_normalization_prompt(self, parent: ProductParent, raw_data: Dict) -> str:
-        """Строит промпт для LLM для нормализации атрибутов."""
+        """Строит универсальный промпт для LLM для нормализации атрибутов."""
         
         # Форматируем сырые данные для отображения в промпте
         parent_attrs_str = json.dumps(raw_data["parent_raw"], ensure_ascii=False, indent=2)
@@ -94,11 +94,16 @@ class AttributeNormalizer:
             variants_str += json.dumps(v["raw_attributes"], ensure_ascii=False, indent=2)
         
         prompt = f"""
-Ты — эксперт по нормализации данных интернет-магазинов.
-Твоя задача: проанализировать сырые атрибуты товара и его вариантов, определить:
-1. Корректные названия атрибутов (некоторые могут быть без имени, только значение)
-2. Какие атрибуты являются ОБЩИМИ для всех вариантов (статические характеристики)
-3. Какие атрибуты являются МОДИФИКАЦИЯМИ (отличают варианты друг от друга, например цвет, размер)
+Ты — интеллектуальный анализатор данных интернет-магазина.
+Твоя задача: проанализировать сырые атрибуты товара и его вариантов, чтобы разделить их на две категории:
+
+1. **Статические атрибуты (static_attributes)**: Характеристики, которые ОДИНАКОВЫ для всех вариантов товара.
+   Примеры: Бренд, Материал корпуса, Страна производства, Гарантия, Тип экрана, Количество колес.
+   Эти данные будут записаны только в родительский товар.
+
+2. **Ключи модификаций (modification_keys)**: Характеристики, которые ОТЛИЧАЮТСЯ у разных вариантов.
+   Это НЕ обязательно только цвет и размер. Это может быть: Объем памяти, Мощность, Тип ткани, Комплектация, Год выпуска и т.д.
+   Ключи должны быть на английском в snake_case (например: 'color', 'size', 'storage_capacity', 'power', 'fabric_type').
 
 ВХОДНЫЕ ДАННЫЕ:
 === РОДИТЕЛЬСКИЙ ТОВАР ===
@@ -107,13 +112,18 @@ class AttributeNormalizer:
 === ВАРИАНТЫ ===
 {variants_str}
 
-ПРАВИЛА:
-1. Модификации — это обычно: цвет, размер, объем памяти, вес, комплектация.
-2. Статические атрибуты — это: материал, бренд, страна, гарантия, общие технические характеристики.
-3. Если у атрибута нет явного имени, определи его по контексту значения.
-4. Верни ТОЛЬКО валидный JSON в формате:
+ПРАВИЛА АНАЛИЗА:
+1. Сравни значения атрибутов across всех вариантов.
+2. Если значение атрибута (или часть названия) меняется от варианта к варианту — это ключ модификации.
+   - Пример: "Цвет: Красный" vs "Цвет: Синий" → ключ "color".
+   - Пример: "Память: 128GB" vs "Память: 256GB" → ключ "storage_capacity".
+3. Если атрибут одинаков для всех — это static_attributes.
+4. Названия ключей в результате должны быть на английском языке в snake_case.
+5. variant_modifications: сопоставь значения модификаций с product_id вариантов.
+
+ВЕРНИ ТОЛЬКО валидный JSON в формате:
 {{
-  "static_attributes": {{"название_атрибута": "значение", ...}},
+  "static_attributes": {{"название_атрибута_en": "значение", ...}},
   "modification_keys": ["ключ1", "ключ2"],
   "variant_modifications": {{
     "product_id_варианта": {{"ключ_модификации": "значение", ...}},
@@ -181,15 +191,18 @@ class AttributeNormalizer:
             logger.warning("⚠️ [LLM APPLY] LLM не вернул статические атрибуты")
         
         # Получаем ключи модификаций
-        mod_keys = llm_data.get("modification_keys", [])
-        if mod_keys:
-            for mk in mod_keys:
-                if mk and str(mk).strip():
-                    parent.modification_attributes[str(mk).strip()] = ""
-            logger.info(f"🔑 [LLM APPLY] Добавлено {len(mod_keys)} ключей модификаций: {mod_keys}")
-        else:
-            logger.warning("⚠️ [LLM APPLY] LLM не вернул ключи модификаций")
+        raw_keys = llm_data.get('modification_keys', [])
         
+        # Жесткий фильтр системных полей (BLACKLIST)
+        blacklist = {'sku', 'id', 'article', 'code', 'код', 'арт', 'номер', 'product_id'}
+        modification_keys = [k for k in raw_keys if k.lower() not in blacklist]
+
+        if len(raw_keys) != len(modification_keys):
+            excluded = set(raw_keys) - set(modification_keys)
+            logger.info(f"🛡️ [FILTER] Исключены ключи (системные): {excluded}")
+        
+        logger.info(f"🔑 [LLM APPLY] Добавлено {len(modification_keys)} ключей модификаций: {modification_keys}")
+
         # Применяем модификации к вариантам
         variant_mods = llm_data.get("variant_modifications", {})
         logger.debug(f"🔍 [LLM DEBUG] variant_modifications от LLM: {variant_mods}")
@@ -222,6 +235,10 @@ class AttributeNormalizer:
             
             if v and v_mods:
                 for mk, mv in v_mods.items():
+                    # Пропускаем ключи из blacklist, если они вдруг проскочили в значениях
+                    if mk.lower() in blacklist:
+                        continue
+                    
                     if mk and mv:
                         v.modification_attributes[str(mk).strip()] = str(mv).strip()
                         applied_count += 1

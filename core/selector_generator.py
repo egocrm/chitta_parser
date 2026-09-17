@@ -159,6 +159,18 @@ class SelectorGenerator:
             "gallery_item_element": "CSS_SELECTOR matching ALL thumbnails/gallery links",
             "gallery_item_attr": "ATTRIBUTE_NAME (e.g. href, src, data-href)",
             "description": "CSS_SELECTOR for main product description block/tab",
+            "variant_selectors": {
+                "color": {
+                    "container": "CSS_SELECTOR for color selection wrapper",
+                    "item": "CSS_SELECTOR for individual color option buttons/swatches",
+                    "value_attr": "ATTRIBUTE_NAME holding color value (e.g. data-color, title, alt)"
+                },
+                "size": {
+                    "container": "CSS_SELECTOR for size selection wrapper",
+                    "item": "CSS_SELECTOR for individual size option buttons",
+                    "value_attr": "ATTRIBUTE_NAME holding size value (e.g. data-size, text content)"
+                }
+            }
         }
 
         cms_hint = ""
@@ -249,6 +261,15 @@ CORRECT OUTPUT (DO THIS ONLY):
 
 5. DESCRIPTION:
 - "description": CSS selector targeting the main product description text block or tab content panel.
+
+6. VARIANT SELECTORS (CRITICAL FOR MODIFICATIONS):
+- "variant_selectors.color.container": CSS selector for the wrapper containing color choice buttons/swatches.
+- "variant_selectors.color.item": CSS selector for individual color option elements (buttons, radio inputs, swatches).
+- "variant_selectors.color.value_attr": Attribute name holding the color value (e.g., "data-color", "title", "alt", or use "" if value is in text content).
+- "variant_selectors.size.container": CSS selector for the wrapper containing size choice buttons.
+- "variant_selectors.size.item": CSS selector for individual size option elements (buttons, select options).
+- "variant_selectors.size.value_attr": Attribute name holding the size value (e.g., "data-size", "value", or "" if value is in text content).
+- If no variant selectors exist, set all nested fields to empty strings "".
 
 
 ### OPERATIONAL RULES:
@@ -506,13 +527,19 @@ Return ONLY a valid JSON object matching the target schema."""
 
     async def clean_scalars_batch(self, scalars_payload: list[dict]) -> list[dict]:
         """
-        Проход 1: Быстрая пакетная очистка легких скалярных полей (пачками по 40–50 шт) без характеристик.
+        Проход 1: Быстрая пакетная очистка легких скалярных полей через Ollama (пачками по 10 шт).
         """
-        prompt = f"""You are a strict e-commerce data cleaning assistant.
+        # Разбиваем большой батч на под-батчи по 10 штук для Ollama
+        batch_size = 10
+        all_results = []
+        
+        for i in range(0, len(scalars_payload), batch_size):
+            chunk = scalars_payload[i:i + batch_size]
+            prompt = f"""You are a strict e-commerce data cleaning assistant.
 Clean and normalize the provided array of product scalar objects.
 
 INPUT SCALARS BATCH:
-{json.dumps({"products": scalars_payload}, ensure_ascii=False, indent=2)}
+{json.dumps({"products": chunk}, ensure_ascii=False, indent=2)}
 
 ### STRICT CLEANING RULES:
 1. PROCESS ALL ITEMS: Maintain exact product_id values and return a "products" array with ALL input items.
@@ -524,12 +551,14 @@ INPUT SCALARS BATCH:
 
 Return ONLY a valid JSON object with key "products" containing the cleaned list."""
 
-        res = await self._call_gemini(prompt, step_name="SCALARS BATCH CLEANER")
-        if isinstance(res, dict) and "products" in res and isinstance(res["products"], list):
-            return res["products"]
+            res = await self._call_ollama(prompt, step_name=f"SCALARS BATCH {i//batch_size + 1}")
+            if isinstance(res, dict) and "products" in res and isinstance(res["products"], list):
+                all_results.extend(res["products"])
+            else:
+                logger.warning(f"⚠️ [OLLAMA SCALARS] Не удалось очистить батч {i//batch_size + 1}, возвращаем исходные данные.")
+                all_results.extend(chunk)
         
-        logger.error("❌ [SCALARS BATCH ERR] Некорректный формат ответа скалярного чистильщика. Возвращаем исходный батч.")
-        return scalars_payload
+        return all_results
 
     async def clean_attributes_mapping(self, raw_keys: list[str]) -> dict:
         """
@@ -567,11 +596,11 @@ EXPECTED OUTPUT EXAMPLE:
 
 Return ONLY a valid JSON object dictionary mapping raw keys to normalized keys."""
 
-        res = await self._call_gemini(prompt, step_name="ATTRIBUTES MAPPING CLEANER")
+        res = await self._call_ollama(prompt, step_name="ATTRIBUTES MAPPING CLEANER")
         if isinstance(res, dict):
             return res
         
-        logger.error("❌ [ATTR MAPPING ERR] Не удалось получить словарь маппинга ключей от Gemini.")
+        logger.error("❌ [ATTR MAPPING ERR] Не удалось получить словарь маппинга ключей от Ollama.")
         return {}
 
     def _build_prompt_scalars(self, cleaned_html: str, engine_name: str) -> str:
