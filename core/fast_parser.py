@@ -634,10 +634,46 @@ class FastSelectorParser:
                     logger.debug(f"🔗 [VARIANT {combo_idx}/{len(combinations)}] Переход на страницу варианта: {variant_url}")
                     
                     # Открываем новую вкладку или переходим на страницу
-                    await page.goto(variant_url, timeout=15000, wait_until="domcontentloaded")
-                    await page.wait_for_timeout(1000)  # Ждем загрузки динамического контента
+                    await page.goto(variant_url, timeout=30000, wait_until="networkidle")
                     
-                    # Извлекаем реальный product_id со страницы варианта
+                    # Явно ждем появления элемента product_id перед попыткой чтения
+                    if self.selectors_map and self.selectors_map.get("product_id_element"):
+                        try:
+                            pid_selector = self.selectors_map["product_id_element"]
+                            logger.debug(f"⏳ [VARIANT {combo_idx}] Ожидание появления селектора: {pid_selector}")
+                            
+                            # Ждем до 10 секунд появления элемента
+                            await page.wait_for_selector(pid_selector, timeout=10000)
+                            
+                            pid_elem = await page.query_selector(pid_selector)
+                            if pid_elem:
+                                attr_name = self.selectors_map.get("product_id_attr", "value")
+                                if attr_name == "text":
+                                    real_product_id = await pid_elem.inner_text()
+                                else:
+                                    real_product_id = await pid_elem.get_attribute(attr_name)
+                                
+                                if real_product_id and str(real_product_id).strip():
+                                    # Пытаемся конвертировать в int, если это число
+                                    try:
+                                        real_product_id = int(str(real_product_id).strip())
+                                    except ValueError:
+                                        pass  # Оставляем как строку, если не число
+                                    
+                                    logger.debug(f"✅ [VARIANT {combo_idx}] Найден реальный product_id: {real_product_id}")
+                            else:
+                                logger.warning(f"⚠️ [VARIANT {combo_idx}] Элемент найден, но пустой")
+                        except PlaywrightTimeoutError:
+                            logger.error(f"❌ [VARIANT {combo_idx}] Таймаут ожидания селектора {self.selectors_map.get('product_id_element')} на странице варианта")
+                        except Exception as e:
+                            logger.warning(f"⚠️ [VARIANT {combo_idx}] Не удалось извлечь product_id: {e}")
+                    
+                    # Возвращаемся на основную страницу для следующей итерации
+                    logger.debug(f"↩️ [VARIANT {combo_idx}] Возврат на основную страницу: {url}")
+                    await page.goto(url, timeout=30000, wait_until="networkidle")
+                    await page.wait_for_timeout(1000)  # Даем время на стабилизацию DOM
+                else:
+                    # Если URL совпадает (редкий случай), пытаемся взять ID из текущей страницы
                     if self.selectors_map and self.selectors_map.get("product_id_element"):
                         try:
                             pid_elem = await page.query_selector(self.selectors_map["product_id_element"])
@@ -647,17 +683,13 @@ class FastSelectorParser:
                                     real_product_id = await pid_elem.inner_text()
                                 else:
                                     real_product_id = await pid_elem.get_attribute(attr_name)
-                                
-                                if real_product_id and real_product_id.isdigit():
-                                    real_product_id = int(real_product_id)
-                                    logger.debug(f"✅ [VARIANT {combo_idx}] Найден реальный product_id: {real_product_id}")
+                                if real_product_id and str(real_product_id).strip():
+                                    try:
+                                        real_product_id = int(str(real_product_id).strip())
+                                    except ValueError:
+                                        pass
                         except Exception as e:
-                            logger.warning(f"⚠️ [VARIANT {combo_idx}] Не удалось извлечь product_id: {e}")
-                    
-                    # Возвращаемся на основную страницу для следующей итерации
-                    logger.debug(f"↩️ [VARIANT {combo_idx}] Возврат на основную страницу: {url}")
-                    await page.goto(url, timeout=15000, wait_until="domcontentloaded")
-                    await page.wait_for_timeout(500)
+                            logger.warning(f"⚠️ [VARIANT {combo_idx}] Ошибка чтения ID с текущей страницы: {e}")
                 
                 # Создаем объект варианта с реальным product_id, если он найден
                 # Если ID не найден - пропускаем этот вариант (критическая ошибка)
