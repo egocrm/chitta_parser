@@ -637,6 +637,24 @@ class FastSelectorParser:
                     available = base_available
                     currency = base_currency
                     
+                    # Извлекаем реальный product_id со страницы варианта
+                    real_product_id = None
+                    if self.selectors_map and self.selectors_map.get("product_id_element"):
+                        try:
+                            pid_elem = await page.query_selector(self.selectors_map["product_id_element"])
+                            if pid_elem:
+                                attr_name = self.selectors_map.get("product_id_attr", "value")
+                                if attr_name == "text":
+                                    real_product_id = await pid_elem.inner_text()
+                                else:
+                                    real_product_id = await pid_elem.get_attribute(attr_name)
+                                
+                                if real_product_id and real_product_id.isdigit():
+                                    real_product_id = int(real_product_id)
+                                    logger.debug(f"✅ [VARIANT {combo_idx}] Найден реальный product_id: {real_product_id}")
+                        except Exception as e:
+                            logger.warning(f"⚠️ [VARIANT {combo_idx}] Не удалось извлечь product_id: {e}")
+                    
                     # Пытаемся найти селектор цены в variant_selectors или используем дефолтный подход
                     price_sel = ""  # Можно расширить, передавая selectors_map
                     if price_sel:
@@ -662,9 +680,11 @@ class FastSelectorParser:
                     available = base_available
                     currency = base_currency
                 
-                # Создаем объект варианта
+                # Создаем объект варианта с реальным product_id, если он найден
+                final_variant_id = str(real_product_id) if real_product_id else str(variant_id).strip()
+                
                 variant = ProductVariant(
-                    product_id=str(variant_id).strip(),
+                    product_id=final_variant_id,
                     parent_product_id=product_id,
                     sku=str(variant_sku).strip(),
                     parent_sku=base_sku,
@@ -692,9 +712,10 @@ class FastSelectorParser:
                 
             except PlaywrightTimeoutError as e:
                 logger.error(f"❌ [VARIANT {combo_idx}] Таймаут при переходе на {variant_url}: {e}")
-                # Создаем вариант с базовыми данными даже при ошибке
+                # Создаем вариант с базовыми данными даже при ошибке, используя fallback ID
+                final_variant_id = str(variant_id).strip()
                 variant = ProductVariant(
-                    product_id=str(variant_id).strip(),
+                    product_id=final_variant_id,
                     parent_product_id=product_id,
                     sku=str(variant_sku).strip(),
                     parent_sku=base_sku,
@@ -716,6 +737,28 @@ class FastSelectorParser:
                 
             except Exception as e:
                 logger.error(f"❌ [VARIANT {combo_idx}] Ошибка обработки варианта {variant_url}: {e}")
+                # Fallback: создаем вариант с базовыми данными
+                final_variant_id = str(variant_id).strip()
+                variant = ProductVariant(
+                    product_id=final_variant_id,
+                    parent_product_id=product_id,
+                    sku=str(variant_sku).strip(),
+                    parent_sku=base_sku,
+                    title=variant_title,
+                    description=parent.description,
+                    price=base_old_price,
+                    fact_price=base_price,
+                    currency=base_currency,
+                    available=base_available,
+                    image=base_image,
+                    product_link=variant_url,
+                    category_id=parent.category_id,
+                    category_name=parent.category_name,
+                    category_link=parent.category_link,
+                    modification_attributes=combination.copy()
+                )
+                variant.parent_id = product_id
+                state_machine.add_variant(product_id, variant)
 
     async def _parse_single_group_variants(
         self,
