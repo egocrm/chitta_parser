@@ -993,6 +993,18 @@ class FastSelectorParser:
             setattr(parent, f"product_id_{alt_idx}", alt_id)
             setattr(parent, f"parent_product_id_{alt_idx}", alt_id)
 
+        # Регистрируем родителя в state_machine перед обработкой вариантов
+        if product_id:
+            state_machine.add_parent(parent)
+            logger.debug(f"✅ [FAST PARSER v2] Зарегистрирован родительский товар ID: {product_id}")
+        else:
+            logger.warning(f"⚠️ [FAST PARSER v2] Не найден product_id для товара {url}, используем заглушку")
+            # Создаем временный ID если product_id не найден
+            temp_id = f"temp_{hash(url) % 100000}"
+            parent.parent_id = temp_id
+            state_machine.add_parent(parent, override_id=temp_id)
+            product_id = temp_id
+
         # 7. Характеристики (attributes)
         attr_cfg = selectors_map.get("attributes", {})
         container_sel = str(attr_cfg.get("container", "")).strip()
