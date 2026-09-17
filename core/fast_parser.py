@@ -622,23 +622,22 @@ class FastSelectorParser:
             variant_sku = f"{base_sku}_{'-'.join(str(v) for v in combination.values())}" if base_sku else variant_id
             
             try:
+                # Инициализируем переменные перед переходом
+                fact_price = base_price
+                old_price = base_old_price
+                available = base_available
+                currency = base_currency
+                real_product_id = None
+                
                 # Если URL варианта отличается от текущего, переходим на него
                 if variant_url != url and variant_url.startswith("http"):
                     logger.debug(f"🔗 [VARIANT {combo_idx}/{len(combinations)}] Переход на страницу варианта: {variant_url}")
                     
                     # Открываем новую вкладку или переходим на страницу
-                    # Используем transition_timeout из config если доступен, иначе 15000ms
                     await page.goto(variant_url, timeout=15000, wait_until="domcontentloaded")
                     await page.wait_for_timeout(1000)  # Ждем загрузки динамического контента
                     
-                    # Переизвлекаем цену, наличие и другие динамические данные
-                    fact_price = base_price
-                    old_price = base_old_price
-                    available = base_available
-                    currency = base_currency
-                    
                     # Извлекаем реальный product_id со страницы варианта
-                    real_product_id = None
                     if self.selectors_map and self.selectors_map.get("product_id_element"):
                         try:
                             pid_elem = await page.query_selector(self.selectors_map["product_id_element"])
@@ -655,36 +654,19 @@ class FastSelectorParser:
                         except Exception as e:
                             logger.warning(f"⚠️ [VARIANT {combo_idx}] Не удалось извлечь product_id: {e}")
                     
-                    # Пытаемся найти селектор цены в variant_selectors или используем дефолтный подход
-                    price_sel = ""  # Можно расширить, передавая selectors_map
-                    if price_sel:
-                        raw_price = await self._safe_get_text(page, price_sel)
-                        if raw_price:
-                            fact_price, old_price = self._extract_all_prices(raw_price, sku=variant_sku, product_id=variant_id)
-                    
-                    avail_sel = ""
-                    if avail_sel:
-                        raw_avail = await self._safe_get_text(page, avail_sel)
-                        if raw_avail:
-                            available = self._normalize_availability(raw_avail)
-                    
                     # Возвращаемся на основную страницу для следующей итерации
                     logger.debug(f"↩️ [VARIANT {combo_idx}] Возврат на основную страницу: {url}")
                     await page.goto(url, timeout=15000, wait_until="domcontentloaded")
                     await page.wait_for_timeout(500)
-                    
-                else:
-                    # Вариант находится на той же странице - используем базовые данные
-                    fact_price = base_price
-                    old_price = base_old_price
-                    available = base_available
-                    currency = base_currency
                 
                 # Создаем объект варианта с реальным product_id, если он найден
-                final_variant_id = str(real_product_id) if real_product_id else str(variant_id).strip()
+                # Если ID не найден - пропускаем этот вариант (критическая ошибка)
+                if not real_product_id:
+                    logger.error(f"❌ [VARIANT {combo_idx}] КРИТИЧЕСКАЯ ОШИБКА: Не найден product_id для {variant_url}. Вариант пропущен.")
+                    continue
                 
                 variant = ProductVariant(
-                    product_id=final_variant_id,
+                    product_id=str(real_product_id),
                     parent_product_id=product_id,
                     sku=str(variant_sku).strip(),
                     parent_sku=base_sku,
@@ -708,57 +690,14 @@ class FastSelectorParser:
                     setattr(variant, f"parent_product_id_{alt_idx}", alt_id)
                 
                 state_machine.add_variant(product_id, variant)
-                logger.debug(f"✅ [VARIANT {combo_idx}] Добавлен вариант: {variant_title} (ID: {variant_id})")
+                logger.info(f"🔹 [VARIANT {combo_idx}] Добавлен вариант: {variant_title} (ID: {real_product_id}, SKU: {variant_sku})")
                 
             except PlaywrightTimeoutError as e:
-                logger.error(f"❌ [VARIANT {combo_idx}] Таймаут при переходе на {variant_url}: {e}")
-                # Создаем вариант с базовыми данными даже при ошибке, используя fallback ID
-                final_variant_id = str(variant_id).strip()
-                variant = ProductVariant(
-                    product_id=final_variant_id,
-                    parent_product_id=product_id,
-                    sku=str(variant_sku).strip(),
-                    parent_sku=base_sku,
-                    title=variant_title,
-                    description=parent.description,
-                    price=base_old_price,
-                    fact_price=base_price,
-                    currency=base_currency,
-                    available=base_available,
-                    image=base_image,
-                    product_link=variant_url,
-                    category_id=parent.category_id,
-                    category_name=parent.category_name,
-                    category_link=parent.category_link,
-                    modification_attributes=combination.copy()
-                )
-                variant.parent_id = product_id
-                state_machine.add_variant(product_id, variant)
-                
+                logger.error(f"❌ [VARIANT {combo_idx}] Таймаут при переходе на {variant_url}: {e}. Вариант пропущен.")
+                continue
             except Exception as e:
-                logger.error(f"❌ [VARIANT {combo_idx}] Ошибка обработки варианта {variant_url}: {e}")
-                # Fallback: создаем вариант с базовыми данными
-                final_variant_id = str(variant_id).strip()
-                variant = ProductVariant(
-                    product_id=final_variant_id,
-                    parent_product_id=product_id,
-                    sku=str(variant_sku).strip(),
-                    parent_sku=base_sku,
-                    title=variant_title,
-                    description=parent.description,
-                    price=base_old_price,
-                    fact_price=base_price,
-                    currency=base_currency,
-                    available=base_available,
-                    image=base_image,
-                    product_link=variant_url,
-                    category_id=parent.category_id,
-                    category_name=parent.category_name,
-                    category_link=parent.category_link,
-                    modification_attributes=combination.copy()
-                )
-                variant.parent_id = product_id
-                state_machine.add_variant(product_id, variant)
+                logger.error(f"❌ [VARIANT {combo_idx}] Ошибка обработки варианта {variant_url}: {e}. Вариант пропущен.")
+                continue
 
     async def _parse_single_group_variants(
         self,
