@@ -190,14 +190,18 @@ class AttributeNormalizer:
             logger.warning("⚠️ [LLM APPLY] LLM не вернул статические атрибуты")
         
         # Получаем ключи модификаций
-        raw_keys = response.get('modification_keys', [])
-        # Жесткий фильтр системных полей
-        blacklist = {'sku', 'id', 'article', 'code', 'код', 'арт', 'номер'}
+        raw_keys = llm_data.get('modification_keys', [])
+        
+        # Жесткий фильтр системных полей (BLACKLIST)
+        blacklist = {'sku', 'id', 'article', 'code', 'код', 'арт', 'номер', 'product_id'}
         modification_keys = [k for k in raw_keys if k.lower() not in blacklist]
 
         if len(raw_keys) != len(modification_keys):
-            print(f"🛡️ [FILTER] Исключены ключи: {set(raw_keys) - set(modification_keys)}")
+            excluded = set(raw_keys) - set(modification_keys)
+            logger.info(f"🛡️ [FILTER] Исключены ключи (системные): {excluded}")
         
+        logger.info(f"🔑 [LLM APPLY] Добавлено {len(modification_keys)} ключей модификаций: {modification_keys}")
+
         # Применяем модификации к вариантам
         variant_mods = llm_data.get("variant_modifications", {})
         logger.debug(f"🔍 [LLM DEBUG] variant_modifications от LLM: {variant_mods}")
@@ -230,6 +234,10 @@ class AttributeNormalizer:
             
             if v and v_mods:
                 for mk, mv in v_mods.items():
+                    # Пропускаем ключи из blacklist, если они вдруг проскочили в значениях
+                    if mk.lower() in blacklist:
+                        continue
+                    
                     if mk and mv:
                         v.modification_attributes[str(mk).strip()] = str(mv).strip()
                         applied_count += 1
