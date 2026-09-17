@@ -7,6 +7,13 @@ logger = logging.getLogger("ChittaParser")
 
 class CatalogStateMachine:
     """Управление графом категорий, товаров и вариантов в памяти с контролем уникальности по product_id."""
+    _instance = None
+
+    @classmethod
+    def get_instance(cls, *args, **kwargs):
+        if cls._instance is None:
+            cls._instance = cls(*args, **kwargs)
+        return cls._instance    
 
     def __init__(self, max_parents: int = 100):
         self.max_parents = max_parents
