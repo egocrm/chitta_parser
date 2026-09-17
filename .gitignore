@@ -1,3 +1,40 @@
-The modified file `live_catalog_parser` appears to be a source code file or executable script, which should not be ignored according to the rules. Since there are no build artifacts, dependency directories, temporary files, or other ignorable items in the change list, no additional rules need to be added to the .gitignore file.
+```
+# Compiled and build artifacts
+*.pyc
+__pycache__/
 
-Nothing should be added to .gitignore in this case.
+# Logs and temp files
+*.log
+*.tmp
+*.swp
+
+# Environment
+.env
+.env.local
+*.env.*
+
+# Editors
+.vscode/
+.idea/
+
+# Dependencies
+.venv/
+venv/
+node_modules/
+
+# Build directories
+dist/
+build/
+target/
+
+# Python specific
+*.pyo
+*.pyd
+*.so
+*.egg-info/
+.coverage
+htmlcov/
+.mypy_cache/
+.pytest_cache/
+.tox/
+```
