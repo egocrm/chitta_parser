@@ -1049,6 +1049,7 @@ class FastSelectorParser:
             if not text: continue
             
             target_value = text.strip()
+            # _check
             previous_url = page.url
             
             clicked = await self._click_variant_option(page, container_sel, item_sel, target_value)
