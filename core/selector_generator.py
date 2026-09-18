@@ -45,13 +45,6 @@ class SelectorGenerator:
             },
         }
 
-        # if step_name:
-        #     logger.info(
-        #         f"\n==================== [OLLAMA PROMPT SENT: {step_name}] ====================\n"
-        #         f"{prompt}\n"
-        #         f"==========================================================================="
-        #     )
-
         try:
             async with httpx.AsyncClient(timeout=float(self.timeout)) as client:
                 response = await client.post(url, json=payload)
@@ -59,12 +52,12 @@ class SelectorGenerator:
                     res_json = response.json()
                     response_text = res_json.get("response", "").strip()
 
-                    if step_name:
-                        logger.info(
-                            f"\n==================== [OLLAMA RAW RESPONSE: {step_name}] ====================\n"
-                            f"{response_text}\n"
-                            f"============================================================================="
-                        )
+                    # if step_name:
+                        # logger.info(
+                        #     f"\n==================== [OLLAMA RAW RESPONSE: {step_name}] ====================\n"
+                        #     f"{response_text}\n"
+                        #     f"============================================================================="
+                        # )
 
                     return json.loads(response_text)
                 else:
@@ -144,7 +137,7 @@ class SelectorGenerator:
     def _build_prompt_pass1(self, cleaned_html: str, engine_name: str) -> str:
         """Проход 1 для Gemini: 100% детализация скаляров, медиа, описания и вариантов без сокращений."""
         example_schema = {
-            "product_id_element": "CSS_SELECTOR targeting primary product ID elements inside main buy block (e.g. input[name='product_id'], button.buy-btn)",
+            "product_id_element": "CSS_SELECTOR targeting primary product ID elements inside main buy block",
             "product_id_attr": "ATTRIBUTE_NAME for primary product ID elements (e.g. value, data-product-id)",
             "title": "CSS_SELECTOR (e.g. .product-title h1)",
             "model": "CSS_SELECTOR or empty string",
@@ -160,15 +153,15 @@ class SelectorGenerator:
             "gallery_item_attr": "ATTRIBUTE_NAME (e.g. href, src, data-href)",
             "description": "CSS_SELECTOR for main product description block/tab",
             "variant_selectors": {
-                "color": {
-                    "container": "CSS_SELECTOR for color selection wrapper",
-                    "item": "CSS_SELECTOR for individual color option buttons/swatches",
-                    "value_attr": "ATTRIBUTE_NAME holding color value (e.g. data-color, title, alt)"
+                "<actual_group_name_1>": {
+                    "container": "CSS_SELECTOR for the wrapper of this specific option group",
+                    "item": "CSS_SELECTOR for individual option buttons/swatches/selects in this group",
+                    "value_attr": "ATTRIBUTE_NAME holding the option value (e.g. data-value, title, value, or '' if text)"
                 },
-                "size": {
-                    "container": "CSS_SELECTOR for size selection wrapper",
-                    "item": "CSS_SELECTOR for individual size option buttons",
-                    "value_attr": "ATTRIBUTE_NAME holding size value (e.g. data-size, text content)"
+                "<actual_group_name_2>": {
+                    "container": "CSS_SELECTOR for the wrapper of this specific option group",
+                    "item": "CSS_SELECTOR for individual option buttons/swatches/selects in this group",
+                    "value_attr": "ATTRIBUTE_NAME holding the option value"
                 }
             }
         }
@@ -232,7 +225,10 @@ CORRECT OUTPUT (DO THIS ONLY):
 - "model": CSS selector for model name or product series.
 - "sku": CSS selector for vendor article code, item SKU, or product code label.
 - "currency": CSS selector targeting currency code or symbol element.
-- "available": CSS selector targeting stock availability text (e.g. "В наличии", "Out of stock", "Под заказ").
+- "available": CSS selector targeting the GENERAL CONTAINER or WRAPPER that holds stock availability information (e.g., `.stock-wrapper`, `.product-availability`, `[data-availability-block]`, `[itemprop='offers']`). 
+  * CRITICAL RULE: DO NOT target specific status elements like `.in-stock`, `.out-of-stock`, or `.stock-status` directly, because these classes may dynamically change or be hidden when the user switches variants. 
+  * Instead, target the PARENT CONTAINER that wraps all availability states. The parser will extract visible text from this container and analyze it.
+  * Example: If the HTML has `<div class="stock-wrapper"><span class="in-stock"
 - "brand_name": CSS selector targeting manufacturer or brand link/text.
 
 2. PRICES ("price_container"):
@@ -263,13 +259,13 @@ CORRECT OUTPUT (DO THIS ONLY):
 - "description": CSS selector targeting the main product description text block or tab content panel.
 
 6. VARIANT SELECTORS (CRITICAL FOR MODIFICATIONS):
-- "variant_selectors.color.container": CSS selector for the wrapper containing color choice buttons/swatches.
-- "variant_selectors.color.item": CSS selector for individual color option elements (buttons, radio inputs, swatches).
-- "variant_selectors.color.value_attr": Attribute name holding the color value (e.g., "data-color", "title", "alt", or use "" if value is in text content).
-- "variant_selectors.size.container": CSS selector for the wrapper containing size choice buttons.
-- "variant_selectors.size.item": CSS selector for individual size option elements (buttons, select options).
-- "variant_selectors.size.value_attr": Attribute name holding the size value (e.g., "data-size", "value", or "" if value is in text content).
-- If no variant selectors exist, set all nested fields to empty strings "".
+- "variant_selectors": This MUST be a dictionary where the KEYS are the ACTUAL, DYNAMIC names of the option groups found on the page (e.g., "color", "size", "memory", "volume", "capacity", "ram", "storage"). 
+- DO NOT hardcode "color" or "size" as keys if the product uses different terminology (like "RAM" and "Storage" for laptops). 
+- For EACH detected group, provide:
+  * "container": CSS selector for the wrapper containing this specific group's choices.
+  * "item": CSS selector for the individual option elements (buttons, radio inputs, select options, swatches).
+  * "value_attr": The attribute name holding the option's value (e.g., "data-value", "title", "value"). Use "" if the value is purely in the text content.
+- If no variant selectors exist on the page, set "variant_selectors" to an empty object.
 
 
 ### OPERATIONAL RULES:
@@ -455,76 +451,6 @@ Return ONLY a valid JSON object matching the target schema."""
 
         return input_payload
 
-
-#     async def clean_products_batch(self, products_payload: list[dict]) -> list[dict]:
-#         """
-#         Пакетная очистка и нормализация массива товаров (по 20 шт) через Gemini API за 1 запрос.
-#         """
-#         prompt = f"""You are a strict e-commerce data cleaning and normalization assistant.
-# Clean and normalize the provided array of product objects in a single batch.
-
-# INPUT PRODUCTS BATCH:
-# {json.dumps({"products": products_payload}, ensure_ascii=False, indent=2)}
-
-# ### FEW-SHOT LEARNING EXAMPLE:
-# INPUT EXAMPLE:
-# {{
-#   "products": [
-#     {{
-#       "product_id": "349429",
-#       "sku": "Код: 410461",
-#       "parent_sku": "",
-#       "brand_name": "Ноутбуки Asus",
-#       "model": "Модель: FA607",
-#       "manufacturer": "Asus Inc.",
-#       "country_of_origin": "Китай",
-#       "attributes": {{
-#         "Діагональ дисплея": "16\\"",
-#         "Країна-виробник": "Китай",
-#         "Обмін та повернення": "Обмін та повернення протягом 14 днів...",
-#         "Характеристики та комплектація": "Виробник залишає за собою право вносити зміни..."
-#       }}
-#     }}
-#   ]
-# }}
-
-# EXPECTED OUTPUT EXAMPLE:
-# {{
-#   "products": [
-#     {{
-#       "product_id": "349429",
-#       "sku": "410461",
-#       "parent_sku": "",
-#       "brand_name": "Asus",
-#       "model": "FA607",
-#       "manufacturer": "Asus",
-#       "country_of_origin": "China",
-#       "attributes": {{
-#         "screen_size": "16\\""
-#       }}
-#     }}
-#   ]
-# }}
-
-# ### STRICT BATCH CLEANING RULES:
-# 1. PROCESS ALL ITEMS: Maintain exact product_id values and return a "products" array with ALL input items.
-# 2. "sku" & "parent_sku": Strip all label prefixes in ANY language ("Код:", "Code:", "Kod:", "Réf:"). Keep only raw alphanumeric code.
-# 3. "brand_name" & "manufacturer": Strip category prefixes ("Ноутбуки Asus" -> "Asus").
-# 4. "model": Strip label words ("Модель:", "Model:").
-# 5. "attributes":
-#    - REMOVE DUPLICATES: Delete keys that duplicate top-level fields ("country_of_origin", "brand_name", "sku", "manufacturer", "model").
-#    - REMOVE GARBAGE & LEGAL NOTES: Strictly delete return policies, store terms, manufacturer modification disclaimers, warranty legal notes, and empty keys like "-".
-#    - NORMALIZE KEYS: Translate and standardize ALL attribute KEYS into short, concise English snake_case identifiers (e.g., "screen_size", "ram_capacity", "cpu", "gpu").
-
-# Return ONLY a valid JSON object with key "products" containing the cleaned list."""
-
-#         res = await self._call_gemini(prompt, step_name="BATCH GEMINI CLEANER")
-#         if isinstance(res, dict) and "products" in res and isinstance(res["products"], list):
-#             return res["products"]
-        
-#         logger.error("❌ [GEMINI BATCH ERR] Некорректный формат ответа Gemini Cleaner. Возвращаем исходный батч.")
-#         return products_payload
-
     async def clean_scalars_batch(self, scalars_payload: list[dict]) -> list[dict]:
         """
         Проход 1: Быстрая пакетная очистка легких скалярных полей через Ollama (пачками по 10 шт).
@@ -548,6 +474,36 @@ INPUT SCALARS BATCH:
 4. "model": Strip label words ("Модель:", "Model:").
 5. "currency": Strip interface noise and extra words (e.g., "₴КупитиПокупкачастинами" -> "₴", "грнКупить" -> "UAH"). Keep strictly a valid currency symbol or ISO code (e.g. "₴", "$", "€", "UAH", "USD", "EUR", "PLN").
 6. "available": Convert availability status to strictly "yes" if the product is in stock / available for purchase, or "no" if out of stock / unavailable / discontinued.
+
+### ⚠️ CRITICAL SEMANTIC CONSISTENCY CHECK (UNIVERSAL RULE):
+Every field in your output MUST logically and semantically relate to the product described in the "title". 
+If ANY extracted value (brand, model, country_of_origin, etc.) clearly belongs to a DIFFERENT product or context — for example, a laptop brand for a suitcase, a phone model for furniture, or an unrelated SKU — it is a scraping leak from a sidebar, footer, or "Recommended Products" block. 
+In such cases, strictly set that inconsistent field to an empty string "".
+
+### EXAMPLES OF SEMANTIC CHECK:
+INPUT 1 (Brand leak):
+{{
+  "title": "ВАЛІЗА V&V TRAVEL FLASH LIGHT 2.0",
+  "brand_name": "Asus",
+  "country_of_origin": "China"
+}}
+EXPECTED OUTPUT 1:
+{{
+  "title": "ВАЛІЗА V&V TRAVEL FLASH LIGHT 2.0",
+  "brand_name": "",
+  "country_of_origin": "China"
+}}
+
+INPUT 2 (Model leak):
+{{
+  "title": "Дрель Bosch Professional",
+  "model": "MacBook Pro 16"
+}}
+EXPECTED OUTPUT 2:
+{{
+  "title": "Дрель Bosch Professional",
+  "model": ""
+}}
 
 Return ONLY a valid JSON object with key "products" containing the cleaned list."""
 
@@ -664,7 +620,7 @@ CORRECT OUTPUT (DO THIS ONLY):
 5. "sku": CSS selector for vendor article code or item SKU.
 6. "price_container": CSS selector targeting the price block/wrapper containing price(s).
 7. "currency": CSS selector targeting currency code element.
-8. "available": CSS selector targeting stock availability text.
+8. "available": CSS selector targeting the GENERAL CONTAINER or WRAPPER that holds stock availability information (e.g., `.stock-wrapper`, `.product-availability`, `[data-availability-block]`). DO NOT target specific status classes like `.in-stock` or `.out-of-stock` directly, as they may change dynamically. Target the parent container that wraps all availability states.
 9. "brand_name": CSS selector targeting manufacturer or brand link/text.
 10. "sales_notes": CSS selector targeting delivery notes or minimum order terms.
 
@@ -744,31 +700,25 @@ HTML SKELETON:
 """
 
     def _build_prompt_variants(self, cleaned_html: str, engine_name: str) -> str:
-        """Промпт 4: Варианты и интерактивные модификации товаров."""
+        """Промпт 4: Варианты и интерактивные модификации товаров (Универсальный)."""
         template = {
-            "variants": {
-                "container": "",
-                "group": "",
-                "group_name": "",
-                "item": "",
-                "value": "",
-                "image": ""
+            "variant_selectors": {
+                "<actual_group_name>": {
+                    "container": "CSS_SELECTOR for the wrapper of this option group",
+                    "item": "CSS_SELECTOR for individual option elements",
+                    "value_attr": "ATTRIBUTE_NAME holding the option value (or '' if text)"
+                }
             }
         }
-        return f"""You are an expert CSS Selector extractor for product options and variants (sizes, colors, volumes).
+        return f"""You are an expert CSS Selector extractor for product options and variants.
 CMS PLATFORM ENGINE: "{engine_name}"
 
-FIELD DEFINITIONS:
-- "variants.container": Outer wrapper holding option choices.
-- "variants.group": Single option group container inside wrapper.
-- "variants.group_name": Title/label of option group (e.g., "Размер", "Цвет").
-- "variants.item": Button, select option, or link element for selecting a variant.
-- "variants.value": Text/label inside variant item.
-- "variants.image": Thumbnail image specific to a variant if present.
-
 RULES:
-1. If no variant options exist on the page, set all nested fields to empty strings "".
-2. Return ONLY a valid JSON object matching the schema below.
+1. Dynamically detect the ACTUAL names of the option groups on the page (e.g., "color", "size", "memory", "volume", "capacity"). Use these exact names as the KEYS in the "variant_selectors" dictionary.
+2. DO NOT hardcode "color" or "size" if the product uses different terms.
+3. For each group, provide "container", "item", and "value_attr".
+4. If no variant options exist on the page, return {{"variant_selectors": {{}}}}.
+5. Return ONLY a valid JSON object matching the schema below.
 
 TARGET SCHEMA:
 {json.dumps(template, indent=2)}

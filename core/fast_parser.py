@@ -193,7 +193,7 @@ class FastSelectorParser:
         Универсально нормализует текстовые и числовые статусы наличия со всех языков к 'yes' или 'no'.
         """
         if not raw_text:
-            return "yes"
+            return None
 
         clean = str(raw_text).lower().strip()
         
@@ -590,199 +590,394 @@ class FastSelectorParser:
         
         return combinations
 
-    async def _resolve_variant_data(
-        self, 
-        page: Page, 
-        base_url: str, 
-        combination: Dict[str, str], 
-        variant_selectors: Dict[str, Any],
-        selectors_map: Dict[str, Any] = None
-    ) -> Dict[str, Any]:
+    async def _click_variant_option(self, page: Page, container_sel: str, item_sel: str, target_value: str) -> bool:
         """
-        ИНТЕРАКТИВНЫЙ РЕЗОЛВЕР v5 (нативные DOM-события):
-        Использует dispatchEvent для эмуляции кликов, которые невозможно отличить от реальных.
-        Обходит все ограничения Playwright API.
+        Универсальный метод взаимодействия с опциями (Waterfall Fallback).
+        1. Прямой переход, если value - это URL.
+        2. Нативный select_option для обычных ID.
+        3. Агрессивная JS-эмуляция для упрямых кастомных тем.
         """
-        result = {
-            "is_variant": False,
-            "product_id": "",
-            "url": base_url,
-            "price": 0.0,
-            "fact_price": 0.0
-        }
-
         try:
-            # ШАГ 1: Интерактивный выбор каждой опции через нативные события
-            for group_name, target_value in combination.items():
-                cfg = variant_selectors.get(group_name, {})
-                # САНИТИЗАЦИЯ СЕЛЕКТОРОВ ПЕРЕД ИСПОЛЬЗОВАНИЕМ
-                container = self._sanitize_selector(str(cfg.get("container", "")).strip())
-                item = self._sanitize_selector(str(cfg.get("item", "")).strip())
-                
-                if not container or not item:
+            if container_sel and item_sel.startswith(container_sel):
+                items_locator = page.locator(item_sel)
+            else:
+                items_locator = page.locator(container_sel).locator(item_sel) if container_sel else page.locator(item_sel)
+            
+            count = await items_locator.count()
+            if count == 0:
+                return False
+            
+            for i in range(count):
+                item = items_locator.nth(i)
+                text = await item.get_attribute("title") or await item.inner_text() or await item.get_attribute("value")
+                if not text:
                     continue
                 
-                # Используем page.evaluate для отправки нативных событий
-                clicked = await page.evaluate("""
-                    (args) => {
-                        const containerSel = args[0];
-                        const itemSel = args[1];
-                        const targetValue = args[2];
-                        
-                        const clean = (str) => (str || '').replace(/\s+/g, ' ').trim().toLowerCase();
-                        const targetClean = clean(targetValue);
-                        
-                        // Находим все элементы-кандидаты
-                        const container = document.querySelector(containerSel);
-                        if (!container) return false;
-                        
-                        const items = container.querySelectorAll(itemSel);
-                        let found = false;
-                        
-                        for (const item of items) {
-                            // Проверяем текст элемента или атрибут title/value
-                            const text = clean(item.textContent || item.getAttribute('title') || item.getAttribute('value') || '');
+                if target_value.lower().strip() in text.lower().strip():
+                    tag = await item.evaluate("el => el.tagName.toLowerCase()")
+                    
+                    if tag == "option":
+                        parent_select = item.locator("xpath=ancestor::select[1]")
+                        if await parent_select.count() > 0:
+                            option_value = await item.get_attribute("value")
                             
-                            if (text === targetClean || text.includes(targetClean)) {
-                                // Определяем тип элемента
-                                if (item.tagName === 'OPTION') {
-                                    // Для <option> меняем selectedIndex родителя и триггерим change
-                                    const select = item.closest('select');
-                                    if (select) {
-                                        select.value = item.value;
-                                        select.dispatchEvent(new Event('change', { bubbles: true }));
-                                        found = true;
-                                        break;
-                                    }
-                                } else if (item.type === 'radio' || item.type === 'checkbox') {
-                                    // Для радио/чекбоксов триггерим click
-                                    item.checked = true;
-                                    item.dispatchEvent(new Event('change', { bubbles: true }));
-                                    item.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
-                                    found = true;
-                                    break;
-                                } else {
-                                    // Для обычных элементов (кнопки, ссылки, label) отправляем полную последовательность
-                                    const rect = item.getBoundingClientRect();
-                                    const x = rect.left + rect.width / 2;
-                                    const y = rect.top + rect.height / 2;
-                                    
-                                    item.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, clientX: x, clientY: y }));
-                                    item.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true, clientX: x, clientY: y }));
-                                    item.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, clientX: x, clientY: y }));
-                                    found = true;
-                                    break;
-                                }
-                            }
-                        }
-                        
-                        // Если не нашли по тексту, пробуем найти по label (для PrestaShop)
-                        if (!found) {
-                            const labels = document.querySelectorAll('label');
-                            for (const label of labels) {
-                                if (clean(label.textContent) === targetClean) {
-                                    const input = label.querySelector('input') || label.previousElementSibling || label.nextElementSibling;
-                                    if (input) {
-                                        if (input.type === 'radio' || input.type === 'checkbox') {
-                                            input.checked = true;
-                                            input.dispatchEvent(new Event('change', { bubbles: true }));
-                                            input.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
-                                            found = true;
-                                            break;
-                                        } else {
-                                            input.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
-                                            found = true;
-                                            break;
-                                        }
+                            # УРОВЕНЬ 1: Прямой переход, если value является ссылкой
+                            if option_value and (option_value.startswith("http") or option_value.startswith("/")):
+                                # logger.info(f"🚀 [CLICK] Прямой переход по URL из <option>: {option_value}")
+                                await page.goto(option_value, wait_until="domcontentloaded", timeout=10000)
+                                return True
+                            
+                            # УРОВЕНЬ 2: Нативный выбор
+                            await parent_select.first.select_option(label=target_value, timeout=3000)
+                            
+                            # УРОВЕНЬ 3: Агрессивная JS-эмуляция (на случай, если нативный выбор не триггернул AJAX)
+                            await page.evaluate("""
+                                (sel) => {
+                                    const el = document.querySelector(sel);
+                                    if (el) {
+                                        el.dispatchEvent(new Event('mousedown', { bubbles: true }));
+                                        el.dispatchEvent(new Event('mouseup', { bubbles: true }));
+                                        el.dispatchEvent(new Event('click', { bubbles: true }));
+                                        el.dispatchEvent(new Event('change', { bubbles: true }));
+                                        el.dispatchEvent(new Event('input', { bubbles: true }));
                                     }
                                 }
-                            }
-                        }
+                            """, await parent_select.first.evaluate("el => el.tagName + (el.id ? '#' + el.id : '') + (el.className ? '.' + el.className.replace(/\\s+/g, '.') : '')")
+                            )
+                            return True
+                            
+                    elif tag == "input":
+                        parent_label = item.locator("xpath=ancestor::label[1]")
+                        if await parent_label.count() > 0:
+                            await parent_label.first.click(timeout=3000)
+                            return True
+                        else:
+                            await item.click(force=True, timeout=3000)
+                            return True
+                    else:
+                        await item.click(force=True, timeout=3000)
+                        return True
                         
-                        return found;
-                    }
-                """, [container, item, target_value])
-                
-                if clicked:
-                    await page.wait_for_timeout(1500) # Ждём, пока сайт обработает событие (AJAX/редирект)
-                else:
-                    logger.warning(f"⚠️ [RESOLVER] Не удалось кликнуть по '{target_value}' в группе '{group_name}'")
+        except Exception as e:
+            logger.warning(f"⚠️ [CLICK HELPER] Ошибка обработки '{target_value}': {e}")
+        
+        return False
 
-            # ШАГ 2: Оцениваем результат
+    def _create_and_add_variant_from_combo(
+        self, page: Page, parent: ProductParent, state_machine: CatalogStateMachine, 
+        extracted_id: str, current_url: str, current_combo: Dict[str, str], leaf_data: Dict[str, Any]
+    ):
+        """Вспомогательный метод для создания и добавления варианта из leaf-узла рекурсии."""
+        mod_parts = [f"{k}: {v}" for k, v in current_combo.items()]
+        variant_title = f"{leaf_data.get('title', '')} ({', '.join(mod_parts)})" if mod_parts else leaf_data.get('title', '')
+        variant_sku = f"{leaf_data.get('sku', '')}_{'-'.join(str(v) for v in current_combo.values())}" if leaf_data.get('sku') else extracted_id
+        
+        variant = ProductVariant(
+            product_id=str(extracted_id),
+            parent_product_id=leaf_data['product_id'],
+            sku=str(variant_sku).strip(),
+            parent_sku=leaf_data.get('sku', ''),
+            title=variant_title,
+            description=parent.description,
+            price=leaf_data.get('old_price', 0),
+            fact_price=leaf_data.get('price', 0),
+            bonus=leaf_data.get('bonus', ''),
+            currency=leaf_data.get('currency', 'UAH'),
+            available=leaf_data.get('available', 'yes'),
+            image=leaf_data.get('image', ''),
+            product_link=current_url,
+            category_id=parent.category_id,
+            category_name=parent.category_name,
+            category_link=parent.category_link,
+            modification_attributes=current_combo.copy(),
+            raw_availability_html=leaf_data.get('raw_availability_html', '')
+        )
+        
+        for alt_idx, alt_id in enumerate(leaf_data.get('extra_product_ids', []), 1):
+            setattr(variant, f"parent_product_id_{alt_idx}", alt_id)
+        
+        state_machine.add_variant(leaf_data['product_id'], variant)
+        # logger.info(f"🔹 [VARIANT ADDED] ID: {extracted_id}")
+
+    async def _resolve_variants_recursive(
+        self,
+        page: Page,
+        parent_url: str,
+        remaining_groups: List[str],
+        current_combo: Dict[str, str],
+        variant_selectors: Dict[str, Any],
+        selectors_map: Dict[str, Any],
+        parent_product: ProductParent,
+        state_machine: CatalogStateMachine,
+        base_data: Dict[str, Any],
+        depth: int = 0
+    ) -> None:
+        """Рекурсивный обход дерева вариантов (DFS). Создание варианта только на 'листе' дерева."""
+        MAX_DEPTH = 3
+        
+        # 1. БАЗОВЫЙ СЛУЧАЙ: Мы перебрали все группы опций. Только здесь мы создаем вариант/модификацию.
+        if not remaining_groups or depth >= MAX_DEPTH:
+            logger.info(f"🛑 [DFS DIAG] ЛИСТ ДЕРЕВА (глубина {depth}). Финальное комбо: {current_combo}")
+            
             current_url = page.url
             
-            if current_url != base_url and current_url.startswith("http"):
-                result["is_variant"] = True
-                result["url"] = current_url
-                logger.debug(f"🔄 [RESOLVER] URL изменился после выбора: {current_url}")
-
-            # ШАГ 3: Считываем ID
-            llm_sel = selectors_map.get("product_id_element", "") if selectors_map else ""
-            llm_attr = selectors_map.get("product_id_attr", "value") if selectors_map else "value"
+            # === НАДЕЖНЫЙ ПОДХОД: Копируем базу для гарантии всех ключей, но ЯВНО сбрасываем динамические поля ===
+            leaf_data = base_data.copy()
             
+            # Явный сброс динамических полей перед попыткой извлечения со страницы варианта
+            leaf_data['price'] = 0.0
+            leaf_data['old_price'] = 0.0
+            leaf_data['bonus'] = ''
+            leaf_data['image'] = ''
+            leaf_data['sales_notes'] = ''
+            
+            try:
+                # 1. Цены (пытаемся извлечь со страницы варианта)
+                price_sel = selectors_map.get("price_container") or selectors_map.get("fact_price", "")
+                if price_sel:
+                    raw_price_text = await self._safe_get_text(page, price_sel)
+                    if raw_price_text:
+                        fact_p, old_p = self._extract_all_prices(raw_price_text, sku=leaf_data.get('sku', ''), product_id="")
+                        if fact_p > 0:
+                            leaf_data['price'] = fact_p
+                        if old_p > 0:
+                            leaf_data['old_price'] = old_p
+                
+                # 2. Валюта
+                currency_sel = selectors_map.get("currency", "")
+                if currency_sel:
+                    raw_currency = await self._safe_get_text(page, currency_sel)
+                    if raw_currency:
+                        leaf_data['currency'] = self._extract_currency(raw_currency)
+                
+                # Фолбэк: если валюта не найдена по селектору, ищем в тексте цены
+                if leaf_data.get('currency') == 'UAH' and price_sel:
+                    raw_price_text_retry = await self._safe_get_text(page, price_sel)
+                    if raw_price_text_retry:
+                        extracted_curr = self._extract_currency(raw_price_text_retry)
+                        if extracted_curr:
+                            leaf_data['currency'] = extracted_curr
+
+                # 3. Бонус/Скидка (ЖЕСТКАЯ ЛОГИКА)
+                bonus_sel = selectors_map.get("bonus", "")
+                if bonus_sel:
+                    bonus_text = await self._safe_get_text(page, bonus_sel)
+                    # Сохраняем только если текст явно содержит признаки скидки
+                    if bonus_text:
+                        # Универсальная валидация: текст содержит '%' или любую распознаваемую валюту (€, zł, CZK и т.д.)
+                        if '%' in bonus_text or self._extract_currency(bonus_text):
+                            leaf_data['bonus'] = bonus_text
+                
+                # Авто-расчет ТОЛЬКО если бонус все еще пуст и цены корректно извлечены
+                if not leaf_data['bonus']:
+                    old_p = leaf_data.get('old_price', 0)
+                    fact_p = leaf_data.get('price', 0)
+                    if old_p > fact_p > 0:
+                        discount_percent = int((1 - (fact_p / old_p)) * 100)
+                        leaf_data['bonus'] = f"-{discount_percent}%"
+                        # logger.info(f"🏷️ [DFS DIAG] Бонус рассчитан: {leaf_data['bonus']} (из {old_p} -> {fact_p})")
+                    # else:
+                        # logger.info(f"🏷️ [DFS DIAG] Бонус не рассчитан: old={old_p}, fact={fact_p}")
+
+                # 4. Наличие (с сохранением сырого HTML для LLM-батчинга)
+                avail_sel = selectors_map.get("available", "")
+                if avail_sel:
+                    try:
+                        avail_locator = page.locator(avail_sel).first
+                        if await avail_locator.count() > 0:
+                            # 1. Сохраняем сырой HTML-фрагмент для последующей обработки LLM (если текст будет неясным)
+                            leaf_data['raw_availability_html'] = await avail_locator.inner_html(timeout=1500)
+                            
+                            # 2. Читаем видимый текст
+                            visible_text = await avail_locator.inner_text(timeout=1500)
+                            
+                            # 3. Используем твой существующий метод. 
+                            # Если текст пуст, он вернет None. Если есть негативные маркеры - "no". Иначе - "yes".
+                            leaf_data['available'] = self._normalize_availability(visible_text)
+                        # Если элемента нет, leaf_data['available'] останется None
+                    except Exception as e:
+                    #     logger.debug(f"⚠️ [AVAILABILITY] Ошибка чтения селектора {avail_sel}: {e}")
+                        pass
+                        
+                # 5. Sales Notes
+                sales_sel = selectors_map.get("sales_notes", "")
+                if sales_sel:
+                    sales_text = await self._safe_get_text(page, sales_sel)
+                    if sales_text:
+                        leaf_data['sales_notes'] = sales_text
+
+                # 6. ГАЛЕРЕЯ КАРТИНОК (Собираем строго со страницы варианта)
+                img_elem_sel = selectors_map.get("main_image_element") or selectors_map.get("main_image", "")
+                img_attr = selectors_map.get("main_image_attr", "src")
+                
+                all_images = []
+                
+                if img_elem_sel:
+                    main_img_raw = await self._safe_get_media_url(page, img_elem_sel, img_attr)
+                    if main_img_raw:
+                        main_img_abs = self._make_absolute_url(main_img_raw, current_url)
+                        if main_img_abs:
+                            all_images.append(main_img_abs)
+                
+                gallery_elem = selectors_map.get("gallery_item_element") or selectors_map.get("gallery_images", "")
+                gallery_attr = selectors_map.get("gallery_item_attr", "src")
+                
+                if gallery_elem:
+                    try:
+                        gallery_loc = page.locator(gallery_elem)
+                        g_count = await gallery_loc.count()
+                        for idx in range(g_count):
+                            el = gallery_loc.nth(idx)
+                            raw_g_url = (await el.get_attribute(gallery_attr) or 
+                                        await el.get_attribute("href") or 
+                                        await el.get_attribute("src") or 
+                                        await el.get_attribute("data-href") or "")
+                            if raw_g_url and not str(raw_g_url).startswith("data:image"):
+                                abs_g_url = self._make_absolute_url(raw_g_url, current_url)
+                                if abs_g_url and abs_g_url not in all_images:
+                                    all_images.append(abs_g_url)
+                    except Exception as e:
+                        logger.warning(f"⚠️ [DFS GALLERY] Ошибка чтения галереи: {e}")
+                
+                if all_images:
+                    leaf_data['image'] = ", ".join(all_images)
+                    # logger.info(f"🖼️ [DFS DIAG] Собрано {len(all_images)} картинок для варианта")
+                    
+            except Exception as e:
+                logger.warning(f"⚠️ [DFS DIAG] Не удалось извлечь актуальные данные, остаются сброшенные (0 или пусто): {e}")
+            # ==========================================================
+
+            # Извлекаем ID
             extracted_id = ""
+            llm_sel = selectors_map.get("product_id_element", "")
+            llm_attr = selectors_map.get("product_id_attr", "value")
             if llm_sel:
                 try:
                     locator = page.locator(llm_sel).first
                     if await locator.count() > 0:
-                        val = await locator.get_attribute(llm_attr, timeout=2000) if llm_attr != "text" else await locator.inner_text(timeout=2000)
+                        val = await locator.get_attribute(llm_attr, timeout=2000)
                         if val and str(val).strip() and str(val).strip() != "0":
                             extracted_id = str(val).strip()
                 except Exception:
                     pass
 
-            # Fallback: ищем специфичные ID вариантов
-            if not extracted_id:
-                generic_id = await page.evaluate("""
-                    () => {
-                        const candidates = [
-                            'input[name="id_product_attribute"]',
-                            'input[name="variation_id"]',
-                            'input[name="id_product_attribute_id"]'
-                        ];
-                        for (const sel of candidates) {
-                            const el = document.querySelector(sel);
-                            if (el && el.value && el.value.trim() && el.value.trim() !== '0') {
-                                return 'attr_' + el.value.trim();
-                            }
-                        }
-                        return '';
-                    }
-                """)
-                if generic_id:
-                    extracted_id = generic_id
-
+            # Проверяем уникальность ID
+            is_duplicate = False
             if extracted_id:
-                result["is_variant"] = True
-                result["product_id"] = extracted_id
-                result["url"] = current_url
+                existing_real_ids = {str(v.product_id) for v in parent_product.variants if not getattr(v, 'is_synthetic', False)}
+                if extracted_id in existing_real_ids or extracted_id == parent_product.product_id:
+                    is_duplicate = True
 
-                # Считываем цену
-                try:
-                    price_text = await page.locator('[itemprop="price"], .current-price, .product-price').first.inner_text(timeout=2000)
-                    parsed = self._parse_price(price_text)
-                    if parsed > 0:
-                        result["fact_price"] = parsed
-                        result["price"] = parsed
-                except Exception:
-                    pass
+            # === ТОЧКА 1: ДИАГНОСТИКА ПЕРЕД СОЗДАНИЕМ ===
+            # logger.info(f"🔍 [DIAG 1] Комбо: {current_combo} | extracted_id: '{extracted_id}' | is_duplicate: {is_duplicate}")
+            # logger.info(f"🔍 [DIAG 1] leaf_data['price']: {leaf_data.get('price')} | leaf_data['old_price']: {leaf_data.get('old_price')}")
+            # logger.info(f"🔍 [DIAG 1] leaf_data['bonus']: '{leaf_data.get('bonus')}'")
+            # ==========================================
+
+            # Создаем запись
+            # === ЛОГИКА СОЗДАНИЯ ЗАПИСИ ===
+            if is_duplicate or not extracted_id:
+                # 1. Инициализируем список modifications в родителе, если его нет
+                if not hasattr(parent_product, 'modifications') or parent_product.modifications is None:
+                    parent_product.modifications = []
                 
-                logger.info(f"✅ [RESOLVER NATIVE] Успешно выбрано: {combination}. ID: {result['product_id']}")
-                return result
+                # 2. КЛЮЧЕВОЕ ДОБАВЛЕНИЕ: Если ID совпадает с родителем, это наш "дефолтный" вариант
+                if extracted_id == parent_product.product_id:
+                    # logger.info(f"🏷️ [DFS DIAG] Найден ДЕФОЛТНЫЙ вариант (ID={extracted_id} == ID родителя). Сохраняем его модификации в parent.default_variant_mods.")
+                    # Явно сохраняем комбинацию как дефолтную для родителя
+                    parent_product.default_variant_mods = current_combo.copy()
+                    # 2. Обновляем данные самого родителя, если они валидны
+                    if leaf_data.get('price', 0) > 0:
+                        parent_product.fact_price = leaf_data['price']
+                    if leaf_data.get('old_price', 0) > 0:
+                        parent_product.price = leaf_data['old_price']
+                    if leaf_data.get('bonus'):
+                        parent_product.bonus = leaf_data['bonus']
+                    if leaf_data.get('image'):
+                        parent_product.image = leaf_data['image']                    
+                else:
+                    # logger.info(f"🏷️ [DFS DIAG] Модификация (ID={extracted_id} не уникален). Сохраняем в parent.modifications.")
+                    if not hasattr(parent_product, 'modifications') or parent_product.modifications is None:
+                        parent_product.modifications = []
+                    
+                    parent_product.modifications.append({
+                        "combo": current_combo.copy(),
+                        "price": leaf_data.get('price', parent_product.fact_price),
+                        "old_price": leaf_data.get('old_price', parent_product.price),
+                        "bonus": leaf_data.get('bonus', ''),
+                        "image": leaf_data.get('image', parent_product.image),
+                        "currency": leaf_data.get('currency', parent_product.currency),
+                        "available": leaf_data.get('available', parent_product.available),
+                        "raw_availability_html": leaf_data.get('raw_availability_html', '')
+                    })
+                
+                # ВАЖНО: Мы делаем return здесь. Вариант НЕ создается и НЕ попадает в parent.variants.
+                return                
+            else:
+                # logger.info(f"✅ [DFS DIAG] Вариант (уникальный ID: {extracted_id})")
+                self._create_and_add_variant_from_combo(page, parent_product, state_machine, extracted_id, current_url, current_combo, leaf_data)
+            
+            return # Возвращаемся ТОЛЬКО здесь, на листе дерева
 
+        # 2. РЕКУРСИВНЫЙ ШАГ: Перебираем опции текущей группы
+        current_group = remaining_groups[0]
+        next_groups = remaining_groups[1:]
+        
+        cfg = variant_selectors.get(current_group, {})
+        container_sel = self._sanitize_selector(str(cfg.get("container", "")).strip())
+        item_sel = self._sanitize_selector(str(cfg.get("item", "")).strip())
+
+        if not container_sel or not item_sel:
+            await self._resolve_variants_recursive(page, parent_url, next_groups, current_combo, variant_selectors, selectors_map, parent_product, state_machine, base_data, depth + 1)
+            return
+
+        if container_sel and item_sel.startswith(container_sel):
+            items_locator = page.locator(item_sel)
+        else:
+            items_locator = page.locator(container_sel).locator(item_sel) if container_sel else page.locator(item_sel)
+
+        try:
+            count = await items_locator.count()
         except Exception as e:
-            logger.warning(f"⚠️ [RESOLVER NATIVE] Ошибка: {e}")
-        finally:
-            # Возвращаем страницу в исходное состояние
-            try:
-                if page.url != base_url:
-                    await page.goto(base_url, timeout=10000, wait_until="domcontentloaded")
-                    await page.wait_for_timeout(1000)
-            except Exception:
-                pass
+            logger.error(f"❌ [DFS DIAG] Ошибка поиска: {e}")
+            return
 
-        logger.debug(f"ℹ️ [RESOLVER] После взаимодействия ID не появился для {combination}. Считается модификацией.")
-        return result
+        for i in range(count):
+            item = items_locator.nth(i)
+            text = await item.get_attribute("title") or await item.inner_text() or await item.get_attribute("value")
+            if not text: continue
+            
+            target_value = text.strip()
+            previous_url = page.url
+            
+            clicked = await self._click_variant_option(page, container_sel, item_sel, target_value)
+            if not clicked: continue
+
+            try:
+                await page.wait_for_load_state("domcontentloaded", timeout=3000)
+            except Exception:
+                await page.wait_for_timeout(1000)
+            
+            # ВАЖНО: Мы НЕ проверяем is_variant здесь для прерывания. 
+            # Мы просто передаем накопленный new_combo дальше в рекурсию.
+            # Рекурсивный вызов для следующих групп
+            new_combo = current_combo.copy()
+            new_combo[current_group] = target_value
+
+            await self._resolve_variants_recursive(
+                page=page, parent_url=parent_url, remaining_groups=next_groups,
+                current_combo=new_combo, variant_selectors=variant_selectors, selectors_map=selectors_map,
+                parent_product=parent_product, state_machine=state_machine, base_data=base_data, depth=depth + 1
+            )
+
+            # Возврат на предыдущую страницу
+            if page.url != previous_url:
+                try:
+                    await page.goto(previous_url, wait_until="domcontentloaded", timeout=10000)
+                    await page.wait_for_timeout(500)
+                except Exception as e:
+                    logger.error(f"❌ [DFS DIAG] Ошибка возврата: {e}")
+                    raise
 
     async def _parse_multi_group_variants(
         self,
@@ -801,70 +996,36 @@ class FastSelectorParser:
         product_id: str,
         extra_product_ids: List[str]
     ):
-        """
-        Обрабатывает варианты с множественными группами.
-        Теперь корректно передает target_href в резолвер для прямого перехода.
-        """
-        combinations = await self._build_variant_combinations(page, url, variant_selectors)
-        
-        if not combinations:
-            logger.warning(f"⚠️ [MULTI-GROUP] Не найдено комбинаций для товара {product_id}")
+        """Точка входа в рекурсивный обход вариантов."""
+        groups = list(variant_selectors.keys())
+        if not groups:
+            # logger.warning(f"⚠️ [MULTI-GROUP] Не найдено групп вариантов для товара {product_id}")
             return
         
-        logger.info(f"📊 [MULTI-GROUP] Найдено {len(combinations)} комбинаций для анализа")
+        base_data = {
+            "title": base_title, "sku": base_sku, "price": base_price, 
+            "old_price": base_old_price, "currency": base_currency, 
+            "available": base_available, "image": base_image, 
+            "product_id": product_id, "extra_product_ids": extra_product_ids
+        }
         
-        for combo_idx, combo_data in enumerate(combinations, 1):
-            combination = combo_data["combination"]
-            target_href = combo_data.get("href", "") # <-- ИЗВЛЕКАЕМ URL, который мы уже нашли
-            
-            resolved = await self._resolve_variant_data(
-                page, 
-                url, 
-                combination, 
-                variant_selectors, 
-                self.selectors_map  # <--- ПЕРЕДАЁМ СЛОВАРЬ, А НЕ СТРОКУ
-            )
-            
-            if resolved["is_variant"] and resolved["product_id"] != product_id:
-                # --- ЭТО ВАРИАНТ ---
-                mod_parts = [f"{k}: {v}" for k, v in combination.items()]
-                variant_title = f"{base_title} ({', '.join(mod_parts)})" if mod_parts else base_title
-                variant_sku = f"{base_sku}_{'-'.join(str(v) for v in combination.values())}" if base_sku else resolved["product_id"]
-                
-                variant = ProductVariant(
-                    product_id=str(resolved["product_id"]),
-                    parent_product_id=product_id,
-                    sku=str(variant_sku).strip(),
-                    parent_sku=base_sku,
-                    title=variant_title,
-                    description=parent.description,
-                    price=resolved["price"] or base_old_price,
-                    fact_price=resolved["fact_price"] or base_price,
-                    currency=base_currency,
-                    available=base_available,
-                    image=base_image,
-                    product_link=resolved["url"],
-                    category_id=parent.category_id,
-                    category_name=parent.category_name,
-                    category_link=parent.category_link,
-                    modification_attributes=combination.copy()
-                )
-                
-                variant.parent_id = product_id
-                for alt_idx, alt_id in enumerate(extra_product_ids, 1):
-                    setattr(variant, f"parent_product_id_{alt_idx}", alt_id)
-                
-                state_machine.add_variant(product_id, variant)
-                logger.info(f"🔹 [VARIANT {combo_idx}] Добавлен: {variant_title} (ID: {resolved['product_id']})")
-                
-            else:
-                # --- ЭТО МОДИФИКАЦИЯ ---
-                for key, val in combination.items():
-                    if key and val:
-                        parent.modification_attributes[key] = val
-                
-                logger.info(f"🏷️ [MODIFICATION {combo_idx}] Уникальный ID не найден. Атрибуты {combination} сохранены как модификации родителя.")
-
+        logger.info(f"🚀 [DFS START] Запуск рекурсивного обхода. Группы: {groups}")
+        
+        await self._resolve_variants_recursive(
+            page=page,
+            parent_url=url,
+            remaining_groups=groups,
+            current_combo={},
+            variant_selectors=variant_selectors,
+            selectors_map=self.selectors_map,
+            parent_product=parent,
+            state_machine=state_machine,
+            base_data=base_data,
+            depth=0
+        )
+        
+        logger.info(f"🏁 [DFS END] Рекурсивный обход завершен. Собрано вариантов: {len(parent.variants)}, модификаций: {len(parent.modifications)}")
+    
     async def _parse_flat_variants(
         self,
         page: Page,
@@ -1239,7 +1400,16 @@ class FastSelectorParser:
 
         # Регистрируем родителя в state_machine перед обработкой вариантов
         if product_id:
-            state_machine.add_parent(parent)
+            # === ПРОВЕРКА: ЭТО УЖЕ СОБРАННЫЙ ВАРИАНТ? ===
+            if hasattr(state_machine, 'registered_variant_ids') and product_id in state_machine.registered_variant_ids:
+                logger.info(f"⏩ [FAST PARSER SKIP] Ссылка {url} ведет на вариант (ID: {product_id}), который уже был собран ранее. Пропускаем.")
+                return None  # Возвращаем None, чтобы main.py знал, что делать нечего
+            
+            is_added = state_machine.add_parent(parent)
+            if not is_added:
+                logger.info(f"⏩ [FAST PARSER SKIP] Товар ID {product_id} уже зарегистрирован в системе. Пропускаем.")
+                return None
+
             logger.debug(f"✅ [FAST PARSER v2] Зарегистрирован родительский товар ID: {product_id}")
         else:
             logger.warning(f"⚠️ [FAST PARSER v2] Не найден product_id для товара {url}, используем заглушку")
@@ -1320,7 +1490,12 @@ class FastSelectorParser:
                     extra_product_ids=extra_product_ids
                 )
 
-        logger.info(f"⚡ [FAST PARSER v2 DONE] Собраны данные для '{parent.title}' (ID: '{parent.product_id}')")
+        # === ФИНАЛЬНАЯ САНИТИЗАЦИЯ (ОДИН РАЗ ПО ПОЛНОМУ СПИСКУ) ===
+        if parent.variants:
+            parent.sanitize_modification_attributes()
+        # =========================================================
+
+        logger.info(f"⚡ [FAST PARSER v2 DONE] Собраны данные РОДИТЕЛЯ для '{parent.title}' (ID: '{parent.product_id}')")
         return parent
 
     async def _capture_active_modifications(self, page: Page, var_cfg: dict, parent: ProductParent) -> dict:

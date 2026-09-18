@@ -89,21 +89,23 @@ def merge_selector_maps(maps_list: list[dict]) -> dict:
             
     return merged
 
-# ИЗМЕНЕНИЕ В main.py
-
 def merge_product_data(primary: Optional[ProductParent], secondary: Optional[ProductParent]) -> Optional[ProductParent]:
     """
     Динамически сливает данные двух объектов ProductParent.
-    Значения из `primary` имеют приоритет, за исключением поля `image`,
-    где выбирается вариант с наибольшим количеством ссылок на картинки (галерея).
-    
-    ИЗМЕНЕНИЯ: Сырые атрибуты (raw_attributes) теперь объединяются, а не перезаписываются.
-    Структурированные атрибуты НЕ копируются автоматически (будут заполнены после нормализации LLM).
+    Значения из `primary` (v2 / FastParser) имеют АБСОЛЮТНЫЙ ПРИОРИТЕТ.
+    Значения из `secondary` (v1 / CMS) используются ТОЛЬКО если в primary стоит None.
     """
     if not primary:
         return secondary
     if not secondary:
         return primary
+    # === ТОЧКА 2: ДИАГНОСТИКА СЛИЯНИЯ ===
+    if secondary.variants:
+        for sec_v in secondary.variants:
+            if sec_v.product_id == primary.product_id:
+                logger.warning(f"⚠️ [DIAG 2] ВНИМАНИЕ! secondary (v1) пытается передать вариант с ID={sec_v.product_id}, который равен ID родителя {primary.product_id}!")
+                logger.warning(f"⚠️ [DIAG 2] secondary variant bonus: '{sec_v.bonus}' | primary parent bonus: '{primary.bonus}'")
+    # ==========================================
 
     # 1. Слияние основных полей объекта
     for attr, sec_val in secondary.__dict__.items():
@@ -111,7 +113,7 @@ def merge_product_data(primary: Optional[ProductParent], secondary: Optional[Pro
             continue
         
         # Пропускаем сырые и структурированные атрибуты в основном цикле - они обрабатываются отдельно
-        if attr in ["attributes", "modification_attributes", "raw_attributes"]:
+        if attr in ["attributes", "modification_attributes", "raw_attributes", "variants", "modifications"]:
             continue
 
         pri_val = getattr(primary, attr, None)
@@ -121,7 +123,7 @@ def merge_product_data(primary: Optional[ProductParent], secondary: Optional[Pro
             pri_imgs = [i.strip() for i in str(pri_val or "").split(",") if i.strip()]
             sec_imgs = [i.strip() for i in str(sec_val or "").split(",") if i.strip()]
             
-            # Приоритетно берем источник с большим количеством фото, добавляя отсутствующие уникальные ссылки
+            # Если у v2 есть свои картинки, мы их не затираем, а мержим.
             base_list = sec_imgs if len(sec_imgs) > len(pri_imgs) else pri_imgs
             append_list = pri_imgs if len(sec_imgs) > len(pri_imgs) else sec_imgs
             
@@ -133,22 +135,26 @@ def merge_product_data(primary: Optional[ProductParent], secondary: Optional[Pro
             setattr(primary, "image", ", ".join(combined))
             continue
 
-        if pri_val in [None, "", 0.0, [], {}] and sec_val not in [None, "", 0.0, [], {}]:
+        # === КЛЮЧЕВОЕ ИЗМЕНЕНИЕ: Приоритет primary (v2) ===
+        # Мы перезаписываем значением из secondary ТОЛЬКО если в primary значение равно None.
+        # Если primary содержит "" или 0.0, мы считаем это осознанным результатом v2 и НЕ перезаписываем.
+        if pri_val is None and sec_val not in [None, "", 0.0, [], {}]:
             setattr(primary, attr, sec_val)
 
-    # 2. Объединение сырых атрибутов (raw_attributes) - ключевое изменение
-    # Собираем все найденные сырые данные из обоих источников для последующей обработки LLM
+    # 2. Объединение сырых атрибутов (raw_attributes)
     if hasattr(secondary, "raw_attributes") and isinstance(secondary.raw_attributes, list):
         if not primary.raw_attributes:
             primary.raw_attributes = []
-        # Добавляем только уникальные записи из secondary, которых еще нет в primary
         for sec_item in secondary.raw_attributes:
             if sec_item not in primary.raw_attributes:
                 primary.raw_attributes.append(sec_item)
 
-    # 3. Перенос вариантов, если у primary они отсутствовали
+    # 3. Перенос вариантов и модификаций, если у primary они отсутствовали
     if not primary.variants and secondary.variants:
         primary.variants = secondary.variants
+        
+    if not getattr(primary, 'modifications', None) and getattr(secondary, 'modifications', None):
+        primary.modifications = secondary.modifications
 
     return primary
 
@@ -351,7 +357,7 @@ async def run_parser(
             if custom_urls:
                 target_links = [u for u in custom_urls if u.rstrip('/') != target_url.rstrip('/')]
                 state_machine.max_parents = len(target_links)
-                logger.info(f"⚙️ [REMOTE CONFIG] Очередь сформирована из {len(target_links)} целевых ссылок API.")
+                # logger.info(f"⚙️ [REMOTE CONFIG] Очередь сформирована из {len(target_links)} целевых ссылок API.")
             else:
                 logger.info("🔍 [SCAN] Загрузка страницы каталога для сбора ссылок...")
                 for attempt in range(1, 4):
@@ -392,7 +398,15 @@ async def run_parser(
 
             # Предварительная генерация карты v2 ДО входа в основной цикл обхода
             cached_selectors_map = None
-            if version == "v2" and target_links:
+
+            # === ВРЕМЕННАЯ ЗАГЛУШКА ДЛЯ ЭКОНОМИИ LLM ===
+            if getattr(config, "USE_HARDCODED_SELECTOR_MAP", False):
+                cached_selectors_map = getattr(config, "HARDCODED_SELECTOR_MAP", {})
+                logger.info("⚡ [STUB] Используется захардкоженная карта селекторов (Gemini отключен).")
+            # ============================================
+
+            # Генерируем карту через LLM только если заглушка не сработала
+            if version == "v2" and target_links and not cached_selectors_map:
                 training_urls = target_links[:min(1, len(target_links))]
                 logger.info(f"🧠 [v2 PHASE 1 MULTI] Генерация мульти-карты по {len(training_urls)} карточкам...")
                 
@@ -519,6 +533,19 @@ async def run_parser(
                                 state_machine=state_machine
                             )
 
+                        # === ОБРАБОТКА ТИХОГО ПРОПУСКА ===
+                        if v2_product is None:
+                            # logger.info(f"⏩ [SKIP URL] Пропуск обработки {link}, так как это уже собранный вариант.")
+                            continue  # Переходим к следующей ссылке в цикле, не заходя в v1 и не вызывая ошибок
+
+                        # ================================
+                        # === ДИАГНОСТИКА 1: Что собрал FastParser? ===
+                        # if v2_product and v2_product.variants:
+                        #     logger.info(f"🔍 [MAIN DIAG 1] FastParser нашел {len(v2_product.variants)} вариантов.")
+                        #     for v in v2_product.variants[:2]:  # Показываем первые 2 для краткости
+                        #         logger.info(f"🔍 [MAIN DIAG 1] Вариант SKU={v.sku} | mod_attrs: {v.modification_attributes}")
+                        # ==============================================
+
                         # 2. ВЫПОЛНЕНИЕ v1 (CMS / Generic Engine) — ВТОРИЧНЫЙ СЛОЙ ДОБОРА И СТРАХОВКИ
                         cms_engine = await engine_detector.select_engine(page, link, forced_engine=engine_name)
                         cms_product = await cms_engine.parse_product_page(page, link, state_machine=state_machine, existing_product=v2_product)
@@ -535,7 +562,7 @@ async def run_parser(
                                 # этот URL ведет на вариант, который мы уже собрали ранее), мы НЕМЕДЛЕННО 
                                 # прерываем обработку этой ссылки. Это предотвращает попытки добавить 
                                 # "варианты" к несуществующему родителю и убирает дубликаты из CSV.
-                                logger.info(f"⏩ [SKIP URL] Ссылка {link} ведет на уже известный вариант (ID: {parent_product.product_id}). Данные уже собраны, пропускаем.")
+                                # logger.info(f"⏩ [SKIP URL] Ссылка {link} ведет на уже известный вариант (ID: {parent_product.product_id}). Данные уже собраны, пропускаем.")
                                 continue
 
                             # Проверяем, не был ли этот ID уже собран как вариант другого родительского товара
@@ -554,6 +581,13 @@ async def run_parser(
                                     fast_parser=fast_parser,
                                     selectors_map=cached_selectors_map
                                 )
+                                # === ДИАГНОСТИКА 2: Что осталось после Universal Parser? ===
+                                # if parent_product and parent_product.variants:
+                                #     logger.info(f"🔍 [MAIN DIAG 2] После UniversalParser в parent_product осталось {len(parent_product.variants)} вариантов.")
+                                #     for v in parent_product.variants[:2]:
+                                #         logger.info(f"🔍 [MAIN DIAG 2] Вариант SKU={v.sku} | mod_attrs: {v.modification_attributes}")
+                                # ==========================================================
+
                             except Exception as var_err:
                                 logger.warning(f"⚠️ [VARIANTS WARN] Ошибка добора вариантов: {var_err}")
 
@@ -626,6 +660,7 @@ async def run_parser(
             for p in chunk:
                 payload.append({
                     "product_id": getattr(p, "product_id", ""),
+                    "title": getattr(p, "title", ""),
                     "sku": getattr(p, "sku", ""),
                     "parent_sku": getattr(p, "parent_sku", ""),
                     "brand_name": getattr(p, "brand_name", ""),
@@ -670,7 +705,7 @@ async def run_parser(
             logger.info(f"✅ [ATTR MAPPING SUCCESS] Автоматически построено правил маппинга: {len(attr_mapping)}")
 
         if attr_mapping:
-            logger.info("⚙️ [LOCAL PYTHON] Применение словаря атрибутов ко всем товарам...")
+            # logger.info("⚙️ [LOCAL PYTHON] Применение словаря атрибутов ко всем товарам...")
             for p in all_parents:
                 # 1. Очистка родительских attributes
                 if getattr(p, "attributes", None) and isinstance(p.attributes, dict):
@@ -716,7 +751,7 @@ async def run_parser(
         # ------------------------------------------------------------------
         # ФИНАЛЬНАЯ СИНХРОНИЗАЦИЯ ВАЛЮТ И БАТЧ-НОРМАЛИЗАЦИЯ НАЛИЧИЯ (OLLAMA)
         # ------------------------------------------------------------------
-        logger.info("🧹 [FINAL SANITIZE] Наследование валют и нормализация наличия...")
+        # logger.info("🧹 [FINAL SANITIZE] Наследование валют и нормализация наличия...")
 
         # 1. Наследование валюты родителя всеми вариантами + сбор сырых статусов наличия
         raw_availability_statuses = set()
@@ -754,13 +789,13 @@ async def run_parser(
                     if variant.available in avail_mapping:
                         variant.available = avail_mapping[variant.available]
 
-        logger.info(f"✅ [FINAL SANITIZE DONE] Нормализовано {len(avail_mapping)} уникальных статусов наличия строго в 'yes'/'no'.")
+        # logger.info(f"✅ [FINAL SANITIZE DONE] Нормализовано {len(avail_mapping)} уникальных статусов наличия строго в 'yes'/'no'.")
 
         # ------------------------------------------------------------------
         # ПАКЕТНОЕ КЛАСТЕРИЗОВАННОЕ ПЕРЕИМЕНОВАНИЕ БЕЗЫМЯННЫХ ОПЦИЙ (OLLAMA)
         # ------------------------------------------------------------------
         if enricher:
-            logger.info("🏷️ [BATCH CLUSTERING] Сбор и кластеризация безымянных модификаций...")
+            # logger.info("🏷️ [BATCH CLUSTERING] Сбор и кластеризация безымянных модификаций...")
 
             signature_to_group = {}  # signature -> group_id
             group_to_values = {}     # group_id -> list of values
@@ -825,6 +860,112 @@ async def run_parser(
                         renamed_count += 1
 
                 logger.info(f"✅ [OLLAMA OPTION RENAME DONE] Переименовано {renamed_count} ключей модификаций.")
+
+        # === ДИАГНОСТИКА 3: Финальное состояние перед экспортом ===
+        # logger.info("🔍 [MAIN DIAG 3] === ФИНАЛЬНАЯ ПРОВЕРКА ПЕРЕД ЭКСПОРТОМ ===")
+        # for p in state_machine.get_all_parents()[:1]: # Проверяем первого родителя
+        #     logger.info(f"🔍 [MAIN DIAG 3] Родитель {p.product_id} имеет {len(p.variants)} вариантов.")
+        #     for v in p.variants[:2]:
+        #         logger.info(f"🔍 [MAIN DIAG 3] Вариант SKU={v.sku} | mod_attrs: {v.modification_attributes}")
+        # logger.info("🔍 [MAIN DIAG 3] ===========================================")
+        # ==============================================
+        for parent in state_machine.get_all_parents():
+            original_count = len(parent.variants)
+            # Оставляем только те варианты, чей ID НЕ равен ID родителя
+            parent.variants = [v for v in parent.variants if str(v.product_id) != str(parent.product_id)]
+            
+            if len(parent.variants) < original_count:
+                logger.info(f"🧹 [CLEANUP] Удалено {original_count - len(parent.variants)} невалидных вариантов с ID={parent.product_id} из родителя {parent.product_id}")
+
+        # ------------------------------------------------------------------
+        # ТОЧЕЧНАЯ ПРОВЕРКА НАЛИЧИЯ ЧЕРЕЗ LLM (для товаров с available=None)
+        # ------------------------------------------------------------------
+        logger.info("🔍 [LLM AVAILABILITY] Поиск товаров с неопределенным наличием...")
+        availability_check_items = []
+        
+        for parent in state_machine.get_all_parents():
+            # Проверяем родителя
+            if parent.available is None and getattr(parent, 'raw_availability_html', ''):
+                availability_check_items.append({
+                    "variant_id": parent.product_id,
+                    "title": parent.title,
+                    "variant_info": "",
+                    "availability_md": OllamaEnricher.html_to_markdown(parent.raw_availability_html)
+                })
+            
+            # Проверяем варианты
+            for variant in parent.variants:
+                if variant.available is None and getattr(variant, 'raw_availability_html', ''):
+                    variant_info = ", ".join([f"{k}: {v}" for k, v in variant.modification_attributes.items()])
+                    availability_check_items.append({
+                        "variant_id": variant.product_id,
+                        "title": parent.title,
+                        "variant_info": variant_info,
+                        "availability_md": OllamaEnricher.html_to_markdown(variant.raw_availability_html)
+                    })
+
+        if availability_check_items:
+            logger.info(f"🔍 [LLM AVAILABILITY] Найдено {len(availability_check_items)} товаров/вариантов с неопределенным наличием. Запуск LLM-батчинга...")
+            
+            # Разбиваем на чанки: не более 20 товаров и не более 50000 символов
+            chunk_size = 20
+            max_chars = 50000
+            
+            chunks = []
+            current_chunk = []
+            current_chars = 0
+            
+            for item in availability_check_items:
+                item_chars = len(item['availability_md']) + len(item['title']) + len(item['variant_info'])
+                if len(current_chunk) >= chunk_size or (current_chars + item_chars > max_chars and current_chunk):
+                    chunks.append(current_chunk)
+                    current_chunk = []
+                    current_chars = 0
+                current_chunk.append(item)
+                current_chars += item_chars
+            if current_chunk:
+                chunks.append(current_chunk)
+            
+            logger.info(f"🔍 [LLM AVAILABILITY] Данные разбиты на {len(chunks)} чанков.")
+            
+            # Обрабатываем чанки
+            all_results = {}
+            for i, chunk in enumerate(chunks):
+                logger.info(f"  🧼 [AVAILABILITY BATCH {i+1}/{len(chunks)}] Обработка {len(chunk)} товаров...")
+                if enricher:
+                    batch_res = await enricher.check_availability_batch(chunk)
+                    all_results.update(batch_res)
+                else:
+                    logger.warning("⚠️ [LLM AVAILABILITY] Ollama не инициализирована, пропускаем LLM-проверку наличия.")
+            
+            # Применяем результаты
+            updated_count = 0
+            for parent in state_machine.get_all_parents():
+                if parent.product_id in all_results:
+                    parent.available = all_results[parent.product_id]
+                    updated_count += 1
+                for variant in parent.variants:
+                    if variant.product_id in all_results:
+                        variant.available = all_results[variant.product_id]
+                        updated_count += 1
+            
+            logger.info(f"✅ [LLM AVAILABILITY DONE] Обновлено наличие для {updated_count} товаров/вариантов через LLM.")
+        else:
+            logger.info("✅ [LLM AVAILABILITY] Все товары имеют определенное наличие, LLM-проверка не требуется.")
+
+        # ------------------------------------------------------------------
+        # ФИНАЛЬНЫЙ ДЕФОЛТ ДЛЯ НАЛИЧИЯ (перед экспортом)
+        # ------------------------------------------------------------------
+        default_count = 0
+        for parent in state_machine.get_all_parents():
+            if parent.available is None:
+                parent.available = "yes"
+                default_count += 1
+            for variant in parent.variants:
+                if variant.available is None:
+                    variant.available = "yes"
+                    default_count += 1
+        logger.info(f"✅ [FINAL AVAILABILITY DEFAULT] Установлено значение 'yes' по умолчанию для {default_count} товаров/вариантов.")
 
         exporter = CSVExporter(output_dir=config.DEFAULT_OUTPUT_DIR)
         exporter.export_all(

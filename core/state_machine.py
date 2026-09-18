@@ -63,15 +63,15 @@ class CatalogStateMachine:
         pid = override_id if override_id else parent.product_id
 
         if not pid:
-            logger.warning(f"⚠️ [SKIP] Товар пропущен [{parent.product_link}]: не найден системный product_id в DOM/API.")
+            # logger.warning(f"⚠️ [SKIP] Товар пропущен [{parent.product_link}]: не найден системный product_id в DOM/API.")
             return False
 
         if pid in self.registered_variant_ids:
-            logger.info(f"⏩ [SKIP PARENT] ID {pid} уже зарегистрирован как дочерний вариант. Пропуск создания родителя.")
+            # logger.info(f"⏩ [SKIP PARENT] ID {pid} уже зарегистрирован как дочерний вариант. Пропуск создания родителя.")
             return False
 
         if pid in self.registered_product_ids:
-            logger.warning(f"⚠️ [PRODUCT_ID] Товар с product_id {pid} уже зарегистрирован.")
+            # logger.warning(f"⚠️ [PRODUCT_ID] Товар с product_id {pid} уже зарегистрирован.")
             return False
 
         # Валидация и фильтрация массива изображений (оставляем только корректные ссылки)
@@ -101,65 +101,8 @@ class CatalogStateMachine:
             return False
 
         if not variant.product_id:
-            logger.warning(f"⚠️ [SKIP] Вариант пропущен [{variant.product_link}]: не найден системный product_id варианта.")
+            # logger.warning(f"⚠️ [SKIP] Вариант пропущен [{variant.product_link}]: не найден системный product_id варианта.")
             return False
-
-        # # Вариант 2: Если ID варианта совпадает с ID родителя (дефолтная активная модификация)
-        # if variant.product_id == parent_product_id:
-        #     parent = self.parents[parent_product_id]
-            
-        #     # 1. Переносим атрибуты модификации в родительский товар
-        #     for attr_k, attr_v in variant.attributes.items():
-        #         if attr_v and attr_k not in parent.attributes:
-        #             parent.attributes[attr_k] = attr_v
-
-        #     # 2. Обновляем SKU родителя, если у него был дефолтный ID
-        #     if variant.sku and (not parent.sku or parent.sku == parent_product_id):
-        #         parent.sku = variant.sku
-
-        #     # 3. Обновляем изображение родителя, если у варианта оно более точное
-        #     if self.is_valid_image_url(variant.image) and not self.is_valid_image_url(parent.image):
-        #         parent.image = variant.image
-
-        #     logger.info(
-        #         f"ℹ️ [VARIANT ENRICH] Вариант '{variant.title}' (ID: {variant.product_id}) совпадает с родителем. "
-        #         f"Данные перенесены в родительский товар, дублирующая запись пропущена."
-        #     )
-        #     return True
-
-        # variant_reg_id = f"{parent_product_id}_{variant.product_id}"
-
-        # if variant_reg_id in self.registered_product_ids:
-        #     logger.warning(f"⚠️ [PRODUCT_ID] Вариант с product_id {variant.product_id} для родителя {parent_product_id} уже зарегистрирован.")
-        #     return False
-
-        # variant.parent_product_id = parent_product_id
-
-        # # Наследование изображения у родителя, если у варианта нет своего
-        # if not self.is_valid_image_url(variant.image):
-        #     variant.image = self.parents[parent_product_id].image
-
-        # # Наследование категории родителя
-        # if not variant.category_id:
-        #     variant.category_id = self.parents[parent_product_id].category_id
-        #     variant.category_name = self.parents[parent_product_id].category_name
-
-        # if not variant.category_link:
-        #     variant.category_link = self.parents[parent_product_id].category_link            
-
-        # parent = self.parents[parent_product_id]
-
-        # # Регистрируем ключи модификаций варианта в родительском объекте
-        # for mod_k in variant.modification_attributes.keys():
-        #     parent.modification_attributes[mod_k] = ""
-
-        # # Очищаем статические атрибуты родителя от ключей модификаций
-        # parent.sanitize_modification_attributes()
-
-        # parent.variants.append(variant)
-        # self.registered_product_ids.add(variant_reg_id)
-        # logger.info(f"🔹 [VARIANT] Добавлен вариант для ID {parent_product_id}: {variant.title} (ID: {variant.product_id}, SKU: {variant.sku})")
-        # return True
 
         parent = self.parents[parent_product_id]
 
@@ -192,7 +135,7 @@ class CatalogStateMachine:
         variant_reg_id = f"{parent_product_id}_{variant.product_id}" + (f"_{mod_sig}" if mod_sig else "")
 
         if variant_reg_id in self.registered_product_ids:
-            logger.warning(f"⚠️ [PRODUCT_ID] Вариант '{variant.title}' (Mod: {mod_sig}) для родителя {parent_product_id} уже зарегистрирован.")
+            # logger.warning(f"⚠️ [PRODUCT_ID] Вариант '{variant.title}' (Mod: {mod_sig}) для родителя {parent_product_id} уже зарегистрирован.")
             return False
 
         variant.parent_product_id = parent_product_id
@@ -214,13 +157,13 @@ class CatalogStateMachine:
             parent.modification_attributes[mod_k] = ""
 
         # Очищаем статические атрибуты родителя от ключей модификаций
-        parent.sanitize_modification_attributes()
+        # parent.sanitize_modification_attributes()
 
         parent.variants.append(variant)
         self.registered_product_ids.add(variant_reg_id)
         if variant.product_id and variant.product_id != parent_product_id:
             self.registered_variant_ids.add(variant.product_id)
-        logger.info(f"🔹 [VARIANT] Добавлен вариант для ID {parent_product_id}: {variant.title} (ID: {variant.product_id}, SKU: {variant.sku}, Mod: {mod_sig})")
+        # logger.info(f"🔹 [VARIANT] Добавлен вариант для ID {parent_product_id}: {variant.title} (ID: {variant.product_id}, SKU: {variant.sku}, Mod: {mod_sig})")
         return True       
 
     def get_all_parents(self) -> List[ProductParent]:

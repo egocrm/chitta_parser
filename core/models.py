@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Any
 
 
 def compute_bonus(price: float, fact_price: float) -> str:
@@ -23,6 +23,7 @@ class Category:
 class ProductVariant:
     """Модель дочернего варианта товара (SKU/ID варианта)"""
     product_id: str = ""
+    is_synthetic: bool = False
     parent_product_id: str = ""
     sku: str = ""
     parent_sku: str = ""
@@ -45,7 +46,8 @@ class ProductVariant:
     brand_name: str = ""
     manufacturer: str = ""
     country_of_origin: str = ""
-    available: str = "yes"
+    available: str = None
+    raw_availability_html: str = "" 
     stock: int = 50
     
     # Сырые данные: список найденных пар {name: value} или просто {value: ""}, если имя не найдено
@@ -91,7 +93,8 @@ class ProductParent:
     brand_name: str = ""
     manufacturer: str = ""
     country_of_origin: str = ""
-    available: str = "yes"
+    available: str = None
+    raw_availability_html: str = ""
     stock: int = 50
     
     # Сырые данные родителя (если есть)
@@ -100,8 +103,12 @@ class ProductParent:
     # Структурированные данные (заполняются после нормализации)
     attributes: Dict[str, str] = field(default_factory=dict)
     modification_attributes: Dict[str, str] = field(default_factory=dict)
+
+    default_variant_mods: Dict[str, str] = field(default_factory=dict)
     
     variants: List[ProductVariant] = field(default_factory=list)
+
+    modifications: List[Dict[str, Any]] = field(default_factory=list)
     
     rules_of_use: str = ""
     links_rules_of_use: str = ""

@@ -169,6 +169,9 @@ class CSVExporter:
 
                 # 2. Запись дочерних вариантов
                 for v in p.variants:
+                    if getattr(v, 'is_synthetic', False):
+                        continue
+
                     if v.product_id == p.product_id:
                         continue
                     v_extra_vals = [self._clean_text(getattr(v, k, "")) for k in extra_id_keys]
@@ -314,8 +317,21 @@ class CSVExporter:
                 # 1. Запись родителя
                 p_extra_vals = [self._clean_text(getattr(p, k, "")) for k in extra_id_keys]
                 p_row = [p.product_id, ""] + p_extra_vals + [p.sku]
+
+                default_mods = getattr(p, 'default_variant_mods', {})
                 for attr in mod_attrs:
-                    p_row.append(self._get_mod_value(p, attr))
+                    val = ""
+                    # Сначала ищем в дефолтных модификациях
+                    for k, v in default_mods.items():
+                        if k.lower() == attr.lower() or f"modification_{k}".lower() == attr.lower():
+                            val = v
+                            break
+                    
+                    # Если не нашли в дефолтных, фолбэк на старые modification_attributes (на всякий случай)
+                    if not val:
+                        val = self._get_mod_value(p, attr)
+                        
+                    p_row.append(self._clean_text(val))
                 p_row.extend([
                     p.price, p.fact_price, self._clean_text(p.bonus), p.currency,
                     p.available, p.stock, self._rewrite_url(p.image), self._clean_text(p.sales_notes)
@@ -324,8 +340,15 @@ class CSVExporter:
 
                 # 2. Запись всех вариантов
                 for v in p.variants:
+                    # === ТОЧКА 3: ДИАГНОСТИКА ЭКСПОРТА ВАРИАНТОВ ===
+                    if v.product_id == p.product_id:
+                        logger.error(f"❌ [DIAG 3] КРИТИЧЕСКАЯ ОШИБКА: Пытаемся экспортировать вариант с ID={v.product_id}, который равен ID родителя {p.product_id}! SKU: {v.sku}, Bonus: '{v.bonus}'")
+                    # ==========================================
+                    export_product_id = v.parent_product_id if getattr(v, 'is_synthetic', False) else v.product_id
+                    
                     v_extra_vals = [self._clean_text(getattr(v, k, "")) for k in extra_id_keys]
-                    v_row = [v.product_id, v.parent_product_id] + v_extra_vals + [v.sku]
+                    v_row = [export_product_id, v.parent_product_id] + v_extra_vals + [v.sku]
+                    
                     for attr in mod_attrs:
                         v_row.append(self._get_mod_value(v, attr))
                     v_row.extend([
@@ -333,6 +356,33 @@ class CSVExporter:
                         v.available, v.stock, self._rewrite_url(v.image), self._clean_text(v.sales_notes)
                     ])
                     writer.writerow(v_row)
+
+                # 3. Запись модификаций, которые были слиты с родителем (ID варианта == ID родителя)
+                for mod in getattr(p, 'modifications', []):
+                    combo = mod.get('combo', {})
+                    mod_sku = f"{p.sku}_{'-'.join(str(v) for v in combo.values())}" if p.sku else p.product_id
+                    
+                    mod_row = [p.product_id, p.product_id] + [self._clean_text(getattr(p, k, "")) for k in extra_id_keys] + [mod_sku]
+                    
+                    for attr in mod_attrs:
+                        val = ""
+                        for k, v in combo.items():
+                            if k.lower() == attr.lower() or f"modification_{k}".lower() == attr.lower():
+                                val = v
+                                break
+                        mod_row.append(self._clean_text(val))
+                        
+                    mod_row.extend([
+                        mod.get('old_price', p.price), 
+                        mod.get('price', p.fact_price), 
+                        self._clean_text(mod.get('bonus', p.bonus)), 
+                        p.currency,
+                        p.available, 
+                        p.stock, 
+                        self._rewrite_url(mod.get('image', p.image)), 
+                        self._clean_text(p.sales_notes)
+                    ])
+                    writer.writerow(mod_row)
 
         # logger.info(f"💾 [EXPORT] Сохранен матричный файл модификаций: {filepath}")
 

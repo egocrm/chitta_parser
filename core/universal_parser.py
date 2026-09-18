@@ -906,6 +906,16 @@ class UniversalSemanticParser:
                 if not v_product_id:
                     v_product_id = parent_product_id
 
+                # === УМНАЯ ЗАЩИТА ОТ ПЕРЕЗАПИСИ ДАННЫХ V2 ===
+                v_id_str = str(v_product_id).strip()
+                parent_id_str = str(parent_product_id).strip()
+                
+                existing_variant = next((v for v in parent.variants if str(v.product_id) == v_id_str), None)
+                if existing_variant or v_id_str == parent_id_str:
+                    logger.info(f"✅ [V1 SKIP LINK] Вариант ID {v_id_str} уже корректно обработан через v2. Пропускаем.")
+                    continue
+
+                # ==================================================
                 v_dom_title = await v_page.evaluate("""
                     () => {
                         const h1 = document.querySelector('h1');
@@ -1213,6 +1223,17 @@ class UniversalSemanticParser:
                                     clean_group_name = clean_group_name or "color"
                                     clean_val = clean_val or p_clean.lower()
 
+                        # === УМНАЯ ЗАЩИТА ОТ ПЕРЕЗАПИСИ ДАННЫХ V2 ===
+                        v_id_str = str(v_product_id).strip()
+                        parent_id_str = str(parent_product_id).strip()
+                        
+                        # Если этот вариант уже есть в списке, или его ID совпадает с ID родителя (дефолтный вариант, обработанный v2)
+                        existing_variant = next((v for v in parent.variants if str(v.product_id) == v_id_str), None)
+                        if existing_variant or v_id_str == parent_id_str:
+                            logger.info(f"✅ [V1 SKIP] Вариант ID {v_id_str} уже корректно обработан через v2 или является дефолтным. Пропускаем, чтобы не создавать дубли и не портить цены.")
+                            continue
+                        # ==================================================
+
                         v_mod_attrs = {}
                         if clean_group_name and clean_val:
                             v_mod_attrs[clean_group_name] = clean_val
@@ -1239,8 +1260,8 @@ class UniversalSemanticParser:
                             modification_attributes=v_mod_attrs
                         )
                         added = state_machine.add_variant(parent_product_id, variant)
-                        if added:
-                            logger.info(f"🔹 [VARIANT] Добавлен вариант для ID {parent_product_id}: {variant.title} (ID: {variant.product_id})")
+                        # if added:
+                        #     logger.info(f"🔹 [VARIANT] Добавлен вариант для ID {parent_product_id}: {variant.title} (ID: {variant.product_id})")
                     except Exception:
                         pass
                 
@@ -1572,6 +1593,7 @@ class UniversalSemanticParser:
                 if any(k.lower() != "option" for k in variant.modification_attributes):
                     variant.modification_attributes.pop("option", None)
 
+        # Синхронизация вариантов: заполняем ТОЛЬКО отсутствующие данные, не перезаписывая корректные значения от v2
         for variant in parent.variants:
             if not variant.brand_name: variant.brand_name = parent.brand_name
             if not variant.manufacturer: variant.manufacturer = parent.manufacturer
@@ -1580,10 +1602,22 @@ class UniversalSemanticParser:
             if not variant.category_name: variant.category_name = parent.category_name
             if not variant.category_link: variant.category_link = parent.category_link
             if not variant.available: variant.available = parent.available
-            if not variant.sales_notes: variant.sales_notes = parent.sales_notes
-            if not variant.bonus: variant.bonus = parent.bonus
-            if parent.price > parent.fact_price and variant.price <= variant.fact_price:
+
+            if variant.sales_notes is None:
+                variant.sales_notes = parent.sales_notes
+
+            if variant.bonus is None:
+                variant.bonus = parent.bonus
+                # logger.info(f"⚠️ [V1 SYNC] Вариант {variant.product_id} имел bonus=None. Заполнен бонусом родителя: '{variant.bonus}'")
+            # elif variant.bonus == "":
+            #     logger.info(f"✅ [V1 PROTECTED] Вариант {variant.product_id} имеет намеренно пустой bonus=''. Оставляем как есть, НЕ перезаписываем родителем ('{parent.bonus}')")
+            
+            # ИЗМЕНЕНИЕ: Заполняем цену только если она равна 0 или отсутствует. 
+            # Никогда не перезаписываем корректную цену варианта ценой родителя!
+            if not variant.price or variant.price == 0.0:
                 variant.price = parent.price
+            if not variant.fact_price or variant.fact_price == 0.0:
+                variant.fact_price = parent.fact_price
 
         return True
 

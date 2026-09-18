@@ -50,3 +50,44 @@ DEFAULT_LLM_PROVIDER = os.getenv("DEFAULT_LLM_PROVIDER", "gemini")
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "")  # или "gemini-2.5-flash"
+
+# ==============================================================================
+# ВРЕМЕННАЯ ЗАГЛУШКА: Использование готовой карты селекторов без вызова LLM
+# ==============================================================================
+USE_HARDCODED_SELECTOR_MAP = False  # Поставь False, когда нужно вернуть Gemini
+
+HARDCODED_SELECTOR_MAP = {
+    "product_id_element": "input#product_page_product_id",
+    "product_id_attr": "value",
+    "title": "h1.product-name",
+    "model": "",
+    "sku": "div.sku",
+    "price_container": ".product-prices",
+    "currency": "",
+    "available": ".in-stock",
+    "brand_name": "",
+    "sales_notes": "",
+    "main_image_element": "div.img-pdp img",
+    "main_image_attr": "src",
+    "gallery_item_element": "div.swiper-slide img",
+    "gallery_item_attr": "src",
+    "description": "div.product-description",
+    "variant_selectors": {
+        "color": {
+            "container": "ul#group_2",
+            "item": "ul#group_2 li.input-container input.input-color",
+            "value_attr": "title"
+        },
+        "size": {
+            "container": "select.form-control-select",
+            "item": "select.form-control-select option",
+            "value_attr": "title"
+        }
+    },
+    "attributes": {
+        "container": "section.product-features > table.table-data-sheet",
+        "row": "tbody > tr",
+        "key": "td:first-child",
+        "value": "td:last-child"
+    }
+}

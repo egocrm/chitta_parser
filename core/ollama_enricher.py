@@ -462,7 +462,7 @@ PRODUCT MARKDOWN SNIPPET:
 {chunk_text}
 """
             raw_res = await self._call_ollama_raw(prompt)
-            logger.info(f"\n==================== [OLLAMA RAW RESPONSE CHUNK {idx}] ====================\n{raw_res}\n==========================================================================")
+            # logger.info(f"\n==================== [OLLAMA RAW RESPONSE CHUNK {idx}] ====================\n{raw_res}\n==========================================================================")
 
             data = {}
             if raw_res:
@@ -668,3 +668,55 @@ STRICT RULES:
             logger.warning(f"⚠️ [OLLAMA OPTION RENAME WARN] Ошибка переименования опций через Ollama: {e}")
 
         return {}        
+        
+    @classmethod
+    def html_to_markdown(cls, html_str: str) -> str:
+        """Преобразует строку HTML в Markdown."""
+        if not html_str:
+            return ""
+        from bs4 import BeautifulSoup
+        soup = BeautifulSoup(html_str, "html.parser")
+        return cls._element_to_markdown(soup)
+
+    async def check_availability_batch(self, items: list[dict]) -> dict:
+        """
+        Проверяет наличие товаров на основе их Markdown-контекста.
+        items: список словарей вида {"variant_id": "...", "title": "...", "variant_info": "...", "availability_md": "..."}
+        Возвращает словарь вида {"variant_id": "yes/no"}.
+        """
+        if not items:
+            return {}
+
+        items_text = ""
+        for item in items:
+            vid = item.get("variant_id", "")
+            title = item.get("title", "")
+            variant_info = item.get("variant_info", "")
+            avail_md = item.get("availability_md", "")
+            
+            items_text += f"\n--- ITEM {vid} ---\n"
+            items_text += f"Title: {title}\n"
+            if variant_info:
+                items_text += f"Variant: {variant_info}\n"
+            items_text += f"Availability Context:\n{avail_md}\n"
+
+        prompt = f"""You are an e-commerce availability checker.
+Based on the 'Availability Context' for each product/variant provided below, determine if it is currently in stock and ready to ship.
+
+{items_text}
+
+Return ONLY a valid JSON object where keys are the ITEM IDs (from the "--- ITEM ... ---" headers) and values are strictly "yes" (if in stock) or "no" (if out of stock, pre-order, or unavailable).
+Example:
+{{
+  "133": "yes",
+  "134": "no"
+}}
+"""
+        res = await self._call_ollama(prompt, step_name="AVAILABILITY CHECKER")
+        
+        result = {}
+        if isinstance(res, dict):
+            for k, v in res.items():
+                if str(v).lower().strip() in ["yes", "no"]:
+                    result[str(k)] = str(v).lower().strip()
+        return result        

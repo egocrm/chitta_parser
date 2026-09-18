@@ -320,5 +320,5 @@ class CategoryExtractor:
             current_parent_id = c_id
             final_cat_id, final_cat_name, final_cat_link = c_id, c_name, c_link
 
-        logger.info(f"✅ [CATEGORY BOUND] Привязана конечная категория: '{final_cat_name}' (ID: {final_cat_id})")
+        # logger.info(f"✅ [CATEGORY BOUND] Привязана конечная категория: '{final_cat_name}' (ID: {final_cat_id})")
         return final_cat_id, final_cat_name, final_cat_link
