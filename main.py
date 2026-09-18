@@ -138,8 +138,14 @@ def merge_product_data(primary: Optional[ProductParent], secondary: Optional[Pro
         # === КЛЮЧЕВОЕ ИЗМЕНЕНИЕ: Приоритет primary (v2) ===
         # Мы перезаписываем значением из secondary ТОЛЬКО если в primary значение равно None.
         # Если primary содержит "" или 0.0, мы считаем это осознанным результатом v2 и НЕ перезаписываем.
-        if pri_val is None and sec_val not in [None, "", 0.0, [], {}]:
-            setattr(primary, attr, sec_val)
+        if attr == "available":
+            if pri_val is None and sec_val not in [None, "yes", "no"]: 
+                # Если v2 вернул None, а v1 нашел что-то конкретное (не дефолт), берем от v1
+                setattr(primary, attr, sec_val)
+        else:
+            # Для всех остальных полей: перезаписываем только если pri_val is None
+            if pri_val is None and sec_val not in [None, "", 0.0, [], {}]:
+                setattr(primary, attr, sec_val)
 
     # 2. Объединение сырых атрибутов (raw_attributes)
     if hasattr(secondary, "raw_attributes") and isinstance(secondary.raw_attributes, list):
@@ -702,7 +708,7 @@ async def run_parser(
         attr_mapping = {}
         if raw_keys:
             attr_mapping = await selector_generator.clean_attributes_mapping(sorted(list(raw_keys)))
-            logger.info(f"✅ [ATTR MAPPING SUCCESS] Автоматически построено правил маппинга: {len(attr_mapping)}")
+            # logger.info(f"✅ [ATTR MAPPING SUCCESS] Автоматически построено правил маппинга: {len(attr_mapping)}")
 
         if attr_mapping:
             # logger.info("⚙️ [LOCAL PYTHON] Применение словаря атрибутов ко всем товарам...")
@@ -874,58 +880,53 @@ async def run_parser(
             # Оставляем только те варианты, чей ID НЕ равен ID родителя
             parent.variants = [v for v in parent.variants if str(v.product_id) != str(parent.product_id)]
             
-            if len(parent.variants) < original_count:
-                logger.info(f"🧹 [CLEANUP] Удалено {original_count - len(parent.variants)} невалидных вариантов с ID={parent.product_id} из родителя {parent.product_id}")
+            # if len(parent.variants) < original_count:
+            #     logger.info(f"🧹 [CLEANUP] Удалено {original_count - len(parent.variants)} невалидных вариантов с ID={parent.product_id} из родителя {parent.product_id}")
 
         # ------------------------------------------------------------------
-        # ТОЧЕЧНАЯ ПРОВЕРКА НАЛИЧИЯ ЧЕРЕЗ LLM (для товаров с available=None)
+        # УМНАЯ ПРОВЕРКА НАЛИЧИЯ ЧЕРЕЗ LLM (для товаров с available=None)
         # ------------------------------------------------------------------
-        logger.info("🔍 [LLM AVAILABILITY] Поиск товаров с неопределенным наличием...")
+        # logger.info("🔍 [LLM AVAILABILITY] Поиск товаров с неопределенным наличием...")
         availability_check_items = []
         
         for parent in state_machine.get_all_parents():
             # Проверяем родителя
             if parent.available is None:
-                availability_md = ""
-                if getattr(parent, 'raw_availability_html', ''):
-                    availability_md = OllamaEnricher.html_to_markdown(parent.raw_availability_html)
+                avail_html = getattr(parent, 'raw_availability_html', '')
+                availability_md = OllamaEnricher.html_to_markdown(avail_html) if avail_html else "No availability context found on page"
                 
                 availability_check_items.append({
                     "variant_id": parent.product_id,
                     "title": parent.title,
                     "variant_info": "",
-                    "availability_md": availability_md or "No availability context found on page"
+                    "availability_md": availability_md
                 })
             
             # Проверяем варианты
             for variant in parent.variants:
                 if variant.available is None:
-                    availability_md = ""
-                    if getattr(variant, 'raw_availability_html', ''):
-                        availability_md = OllamaEnricher.html_to_markdown(variant.raw_availability_html)
-                    
+                    avail_html = getattr(variant, 'raw_availability_html', '')
+                    availability_md = OllamaEnricher.html_to_markdown(avail_html) if avail_html else "No availability context found on page"
                     variant_info = ", ".join([f"{k}: {v}" for k, v in variant.modification_attributes.items()])
+                    
                     availability_check_items.append({
                         "variant_id": variant.product_id,
                         "title": parent.title,
                         "variant_info": variant_info,
-                        "availability_md": availability_md or "No availability context found on page"
+                        "availability_md": availability_md
                     })
 
         if availability_check_items:
             logger.info(f"🔍 [LLM AVAILABILITY] Найдено {len(availability_check_items)} товаров/вариантов с неопределенным наличием. Запуск LLM-батчинга...")
             
             # Разбиваем на чанки: не более 20 товаров и не более 50000 символов
-            chunk_size = 20
-            max_chars = 50000
-            
             chunks = []
             current_chunk = []
             current_chars = 0
             
             for item in availability_check_items:
                 item_chars = len(item['availability_md']) + len(item['title']) + len(item['variant_info'])
-                if len(current_chunk) >= chunk_size or (current_chars + item_chars > max_chars and current_chunk):
+                if len(current_chunk) >= 20 or (current_chars + item_chars > 50000 and current_chunk):
                     chunks.append(current_chunk)
                     current_chunk = []
                     current_chars = 0
@@ -934,12 +935,10 @@ async def run_parser(
             if current_chunk:
                 chunks.append(current_chunk)
             
-            logger.info(f"🔍 [LLM AVAILABILITY] Данные разбиты на {len(chunks)} чанков.")
-            
             # Обрабатываем чанки
             all_results = {}
             for i, chunk in enumerate(chunks):
-                logger.info(f"  🧼 [AVAILABILITY BATCH {i+1}/{len(chunks)}] Обработка {len(chunk)} товаров...")
+                # logger.info(f"  🧼 [AVAILABILITY BATCH {i+1}/{len(chunks)}] Обработка {len(chunk)} товаров...")
                 if enricher:
                     batch_res = await enricher.check_availability_batch(chunk)
                     all_results.update(batch_res)
@@ -958,22 +957,47 @@ async def run_parser(
                         updated_count += 1
             
             logger.info(f"✅ [LLM AVAILABILITY DONE] Обновлено наличие для {updated_count} товаров/вариантов через LLM.")
-        else:
-            logger.info("✅ [LLM AVAILABILITY] Все товары имеют определенное наличие, LLM-проверка не требуется.")
+        # else:
+            # logger.info("✅ [LLM AVAILABILITY] Все товары имеют определенное наличие, LLM-проверка не требуется.")
 
+                # ------------------------------------------------------------------
+        # ФИНАЛЬНАЯ СИНХРОНИЗАЦИЯ НАЛИЧИЯ И ОСТАТКОВ (перед экспортом)
         # ------------------------------------------------------------------
-        # ФИНАЛЬНЫЙ ДЕФОЛТ ДЛЯ НАЛИЧИЯ (перед экспортом)
-        # ------------------------------------------------------------------
-        default_count = 0
+        default_avail_count = 0
+        sync_stock_count = 0
+        
         for parent in state_machine.get_all_parents():
+            # 1. Обработка родителя
             if parent.available is None:
                 parent.available = "yes"
-                default_count += 1
+                default_avail_count += 1
+            
+            # Синхронизация stock с available для родителя
+            if parent.available == "no":
+                if parent.stock != 0:
+                    parent.stock = 0
+                    sync_stock_count += 1
+            else:
+                # Если товар "в наличии", но остаток почему-то 0 или отрицательный, ставим безопасный дефолт
+                if parent.stock <= 0:
+                    parent.stock = 50
+
+            # 2. Обработка вариантов
             for variant in parent.variants:
                 if variant.available is None:
                     variant.available = "yes"
-                    default_count += 1
-        logger.info(f"✅ [FINAL AVAILABILITY DEFAULT] Установлено значение 'yes' по умолчанию для {default_count} товаров/вариантов.")
+                    default_avail_count += 1
+                
+                # Синхронизация stock с available для варианта
+                if variant.available == "no":
+                    if variant.stock != 0:
+                        variant.stock = 0
+                        sync_stock_count += 1
+                else:
+                    if variant.stock <= 0:
+                        variant.stock = 50
+
+        # logger.info(f"✅ [FINAL SANITIZE] Дефолт available='yes' установлен для {default_avail_count} товаров. Stock=0 синхронизирован для {sync_stock_count} отсутствующих товаров.")
 
         exporter = CSVExporter(output_dir=config.DEFAULT_OUTPUT_DIR)
         exporter.export_all(

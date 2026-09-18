@@ -188,68 +188,107 @@ class FastSelectorParser:
         return ""
 
     @staticmethod
-    def _normalize_availability(raw_text: str) -> str:
+    def _normalize_availability(raw_text: str) -> Optional[str]:
         """
-        Универсально нормализует текстовые и числовые статусы наличия со всех языков к 'yes' или 'no'.
+        Универсально нормализует статусы наличия на 44+ языках. 
+        Возвращает 'yes', 'no' или None (если сигнал неочевиден и нужна проверка LLM).
         """
         if not raw_text:
             return None
 
         clean = str(raw_text).lower().strip()
         
-        # Если статус совпадает с явным нулем "0", "0 шт", "qty: 0"
-        if re.search(r'\b0\s*(шт|pcs|st|items|unit|ед)?\b', clean):
+        # 1. Явный ноль с единицей измерения (универсально)
+        # Мы требуем обязательную единицу измерения, чтобы не спутать "0" в "0,00 грн" с наличием
+        if re.search(r'\b0\s+(шт|pcs|st|items|unit|ед|szt|бр|adet|個|個数)\b', clean):
             return "no"
 
-        # Расширенный мультиязычный список негативных маркеров
+        # 2. Расширенный мультиязычный список НЕГАТИВНЫХ маркеров (Out of Stock)
         negative_signals = [
-            # UA / RU (Украинский и Русский)
-            "нет в наличии", "немає в наявності", "нет", "немає", "нету", 
-            "отсутствует", "відсутній", "відсутня", "закончился", "закінчився", 
-            "закончились", "закінчилися", "снят с производства", "знято з виробництва", 
-            "снято с продажи", "знято з продажу", "недоступен", "недоступно", "не доступно",
-            "распродано", "розпродано", "очікується", "ожидается", "под заказ", "під замовлення",
-            "уточняйте наличие", "уточнюйте наявність",
-
-            # EN (Английский)
-            "out of stock", "sold out", "unavailable", "backorder", "backordered",
-            "discontinued", "out-of-stock", "temporarily unavailable", "coming soon",
-            "pre-order", "preorder", "no stock", "not in stock", "zero stock",
-
-            # DE (Немецкий)
-            "nicht auf lager", "ausverkauft", "nicht lieferbar", "derzeit nicht verfügbar",
-            "vergriffen", "nicht vorrätig", "bestellt", "nicht verfügbar",
-
-            # PL (Польский)
-            "brak w magazynie", "niedostępny", "niedostępne", "wyprzedane", 
-            "brak towaru", "oczekiwanie na dostawę", "chwilowo brak",
-
-            # FR (Французский)
+            # UA / RU
+            "нет в наличии", "немає в наявності", "нет", "немає", "нету", "отсутствует", 
+            "відсутній", "відсутня", "закончился", "закінчився", "закончились", "закінчилися", 
+            "снят с производства", "знято з виробництва", "снято с продажи", "знято з продажу", 
+            "недоступен", "недоступно", "не доступно", "распродано", "розпродано", 
+            "очікується", "ожидается", "под заказ", "під замовлення", "уточняйте наличие", "уточнюйте наявність",
+            # EN
+            "out of stock", "sold out", "unavailable", "backorder", "backordered", "discontinued", 
+            "out-of-stock", "temporarily unavailable", "coming soon", "pre-order", "preorder", 
+            "no stock", "not in stock", "zero stock",
+            # DE / NL
+            "nicht auf lager", "ausverkauft", "nicht lieferbar", "derzeit nicht verfügbar", 
+            "vergriffen", "nicht vorrätig", "bestellt", "niet op voorraad", "uitverkocht",
+            # PL / CS / SK / SL / HR / SR
+            "brak w magazynie", "niedostępny", "niedostępne", "wyprzedane", "brak towaru", 
+            "oczekiwanie na dostawę", "chwilowo brak", "nie ma na stanie",
+            "není skladem", "vyprodáno", "nedostupné", "nie je na sklade", "vypredané",
+            "ni na zalogi", "razprodano", "nema na zalihi", "rasprodano", "nema na stanju", "rasprodato",
+            # FR / ES / PT / IT / RO
             "épuisé", "non disponible", "rupture de stock", "indisponible", "hors stock",
-
-            # ES (Испанский)
-            "agotado", "no disponible", "fuera de stock", "sin stock", "no hay stock",
-
-            # IT (Итальянский)
+            "agotado", "fuera de stock", "sin stock", "no hay stock", "no disponible",
+            "esgotado", "fora de estoque", "indisponível", "sem estoque",
             "esaurito", "non disponibile", "non in magazzino", "fuori stock",
-
-            # RO (Румынский)
-            "stoc epuizat", "nu este in stoc", "indisponibil", "fara stoc",
-
-            # CS / SK (Чешский и Словацкий)
-            "vyprodáno", "není skladem", "nedostupné", "vypredané", "nie je na sklade",
-
-            # TR (Турецкий)
-            "stokta yok", "tükendi", "temin edilemiyor",
-
-            # Системные и универсальные флаги
-            "false", "no", "none", "null", "disabled", "off"
+            "nu este in stoc", "epuizat", "indisponibil", "fara stoc", "stoc epuizat",
+            # Nordic: DA / SV / NO / FI / IS
+            "ikke på lager", "udsolgt", "inte i lager", "slutsåld", "ikke på lager", "utsolgt",
+            "ei varastossa", "loppuunmyyty", "ekki til á lager", "uppselt",
+            # Baltic: LV / LT / ET
+            "nav noliktavā", "izpārdots", "nėra sandėlyje", "išparduota", "pole laos", "läbimüüdud",
+            # Eastern EU: HU / BG / EL / MN / KK
+            "nincs raktáron", "elfogyott", "няма в наличност", "изчерпан", "μη διαθέσιμο", "εξαντλήθηκε",
+            "байхгүй", "дууссан", "қойымда жоқ", "сатылып бітті",
+            # Asian: ZH / JA / KO / TH / VI / ID / TL / BN / HI
+            "缺货", "无货", "售罄", "暫無現貨",
+            "在庫切れ", "売り切れ", "入荷未定", "品切れ",
+            "재고 없음", "품절", "품절예정", "재고 소진",
+            "สินค้าหมด", "หมดสต็อก", "สินค้าหมดชั่วคราว",
+            "hết hàng", "tạm hết hàng", "không có sẵn",
+            "stok habis", "tidak tersedia", "kehabisan stok",
+            "walang stock", "ubos na", "hindi available",
+            "স্টকে নেই", "শেষ হয়েছে",
+            "स्टॉक में नहीं है", "समाप्त", "अनुपलब्ध",
+            # Other: TR / AF / SW
+            "stokta yok", "tükendi", "temin edilemiyor", "mevcut değil",
+            "nie op voorraad nie", "uitverkoop",
+            "haipo stokini", "imeisha"
         ]
-
+        
         if any(sig in clean for sig in negative_signals):
             return "no"
 
-        return "yes"        
+        # 3. Числовое наличие (универсально). 
+        # ИСПРАВЛЕНО: \s+ и отсутствие '?' делают единицу измерения ОБЯЗАТЕЛЬНОЙ.
+        # Это предотвращает ложное срабатывание на "5 " в тексте "5 590,00 грн".
+        if re.search(r'\b[1-9]\d*\s+(шт|pcs|st|items|unit|ед|szt|бр|adet|個|個数)\b', clean):
+            return "yes"
+
+        # 4. БАЗОВЫЕ позитивные маркеры (In Stock). 
+        # Только самые однозначные фразы, чтобы избежать ложных срабатываний на описаниях товаров.
+        core_positive_signals = [
+            # UA / RU
+            "в наявності", "в наличии", "є в наявності", "есть в наличии",
+            # EN
+            "in stock", "instock", "available", "ready to ship",
+            # DE / NL
+            "auf lager", "verfügbar", "op voorraad", "beschikbaar",
+            # PL / CS / SK
+            "w magazynie", "dostępny", "na stanie", "skladem",
+            # FR / ES / PT / IT
+            "en stock", "disponible", "em estoque", "disponível", "in magazzino",
+            # Nordic / Baltic
+            "på lager", "i lager", "varastossa", "noliktavā", "sandėlyje", "laos",
+            # Asian / TR
+            "有货", "現貨", "在庫あり", "재고 있음", "มีสินค้า", "còn hàng", "có sẵn", 
+            "tersedia", "may stock", "stokta var", "mevcut"
+        ]
+        
+        if any(sig in clean for sig in core_positive_signals):
+            return "yes"
+
+        # 5. FALLBACK: Если нет ни явных "нет", ни явных "да", ни чисел с единицами измерения.
+        # Скорее всего, селектор захватил название товара, цену, код (SKU) или мусор.
+        # Мы НЕ можем уверенно сказать "yes". Возвращаем None, чтобы сработал LLM-батчинг.
+        return None    
 
     @staticmethod
     def _make_absolute_url(raw_url: str, base_url: str) -> str:
@@ -780,45 +819,86 @@ class FastSelectorParser:
                     # else:
                         # logger.info(f"🏷️ [DFS DIAG] Бонус не рассчитан: old={old_p}, fact={fact_p}")
 
-                # 4. Наличие (с жестким fallback, если селектор не сработал)
+                # 4. Наличие: FAST-PATH (быстрый текст) -> SLOW-PATH (HTML для LLM)
                 avail_sel = selectors_map.get("available", "")
-                found_availability = False
+                found_clear_status = False
                 
+                # ШАГ 1: Быстрая проверка основного селектора по тексту
                 if avail_sel:
                     try:
                         avail_locator = page.locator(avail_sel).first
                         if await avail_locator.count() > 0:
-                            leaf_data['raw_availability_html'] = await avail_locator.inner_html(timeout=1500)
                             visible_text = await avail_locator.inner_text(timeout=1500)
-                            leaf_data['available'] = self._normalize_availability(visible_text)
-                            found_availability = True
+                            clean_text_for_log = visible_text.replace('\n', ' ').strip()[:100] # Для логов, чтобы не спамить
+                            fast_result = self._normalize_availability(visible_text)
+                            
+                            # logger.info(f"🔍 [AVAIL STEP 1] Селектор: '{avail_sel}' | Текст: '{clean_text_for_log}' | Вердикт: {fast_result}")
+                            
+                            if fast_result in ["yes", "no"]:
+                                leaf_data['available'] = fast_result
+                                leaf_data['raw_availability_html'] = "" # LLM не нужен, мы уже знаем ответ
+                                found_clear_status = True
                     except Exception as e:
-                        # logger.debug(f"⚠️ [AVAILABILITY] Ошибка чтения селектора {avail_sel}: {e}")
-                        pass
+                        logger.debug(f"⚠️ [AVAIL STEP 1] Ошибка: {e}")
                 
-                # FALLBACK: Если селектор пуст, или модель ошиблась и элементов 0
-                if not found_availability:
+                # ШАГ 2: Если не нашли, поднимаемся по DOM и ПРОВЕРЯЕМ ТЕКСТ (Fast Path Fallback)
+                if not found_clear_status:
                     fallback_sel = selectors_map.get("price_container") or selectors_map.get("title", "")
                     if fallback_sel:
                         try:
-                            fallback_locator = page.locator(fallback_sel).first
-                            if await fallback_locator.count() > 0:
-                                parent_html = await fallback_locator.evaluate("""
-                                    (el) => {
-                                        let current = el.parentElement;
+                            # Одним запросом JS получаем innerText самого элемента, родителя и прародителя
+                            texts = await page.evaluate("""
+                                (sel) => {
+                                    const el = document.querySelector(sel);
+                                    if (!el) return [];
+                                    const results = [];
+                                    let current = el;
+                                    for (let i = 0; i <= 2; i++) { // 0 = сам элемент, 1 = родитель, 2 = прародитель
+                                        if (current && current !== document.body) {
+                                            results.push(current.innerText);
+                                            current = current.parentElement;
+                                        }
+                                    }
+                                    return results;
+                                }
+                            """, fallback_sel)
+
+                            # Проверяем каждый уровень нашим быстрым Python-методом
+                            for level, txt in enumerate(texts):
+                                clean_txt_for_log = txt.replace('\n', ' ').strip()[:100]
+                                fast_result = self._normalize_availability(txt)
+                                
+                                # logger.info(f"🔍 [AVAIL STEP 2] Уровень DOM +{level} | Текст: '{clean_txt_for_log}' | Вердикт: {fast_result}")
+                                
+                                if fast_result in ["yes", "no"]:
+                                    leaf_data['available'] = fast_result
+                                    leaf_data['raw_availability_html'] = "" # LLM не нужен
+                                    found_clear_status = True
+                                    break
+                            
+                            # ШАГ 3: SLOW-PATH. Только если текст на всех уровнях не дал четкого "yes" или "no", сохраняем HTML для LLM
+                            if not found_clear_status and len(texts) > 0:
+                                # logger.info(f"🔍 [AVAIL STEP 3] Четкий сигнал не найден. Готовим HTML для LLM-батчинга.")
+                                parent_html = await page.evaluate("""
+                                    (sel) => {
+                                        const el = document.querySelector(sel);
+                                        if (!el) return '';
+                                        let current = el;
                                         for (let i = 0; i < 2 && current && current !== document.body; i++) {
                                             current = current.parentElement;
                                         }
                                         return current ? current.innerHTML : '';
                                     }
-                                """)
+                                """, fallback_sel)
+                                
                                 if parent_html:
                                     leaf_data['raw_availability_html'] = parent_html
-                                    leaf_data['available'] = None # Принудительно в None для LLM-батчинга
-                                    # logger.info(f"🔍 [AVAILABILITY FALLBACK] Основной селектор не сработал. Используем HTML родительского контейнера для LLM.")
+                                    leaf_data['available'] = None # Принудительно в None, чтобы main.py отправил это в LLM
                         except Exception as e:
-                            # logger.debug(f"⚠️ [AVAILABILITY FALLBACK] Ошибка: {e}")
-                            pass
+                            logger.debug(f"⚠️ [AVAIL FALLBACK] Ошибка: {e}")
+                # else:
+                #     logger.info(f"✅ [AVAIL SKIP] Наличие уже определено на Шаге 1, пропускаем Fallback и LLM.")
+
 
                 # 5. Sales Notes
                 sales_sel = selectors_map.get("sales_notes", "")

@@ -1601,7 +1601,9 @@ class UniversalSemanticParser:
             if not variant.category_id: variant.category_id = parent.category_id
             if not variant.category_name: variant.category_name = parent.category_name
             if not variant.category_link: variant.category_link = parent.category_link
-            if not variant.available: variant.available = parent.available
+            
+            if variant.available is None and parent.available not in [None, "yes", "no"]:
+                variant.available = parent.available
 
             if variant.sales_notes is None:
                 variant.sales_notes = parent.sales_notes

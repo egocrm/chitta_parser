@@ -711,11 +711,23 @@ Otherwise, return "yes".
 
 Return ONLY a valid JSON object where keys are the ITEM IDs and values are strictly "yes" or "no".
 """
-        res = await self._call_ollama(prompt, step_name="AVAILABILITY CHECKER")
+        res = await self._call_ollama_raw(prompt)
         
         result = {}
-        if isinstance(res, dict):
+        if isinstance(res, dict): # Если вдруг _call_ollama_raw вернул dict (хотя он должен возвращать str, который мы парсим ниже, но оставим как есть для совместимости)
             for k, v in res.items():
                 if str(v).lower().strip() in ["yes", "no"]:
                     result[str(k)] = str(v).lower().strip()
-        return result        
+        else:
+            # Если вернулась строка (как и должно быть по сигнатуре _call_ollama_raw), парсим её
+            try:
+                import json
+                parsed_res = json.loads(res)
+                if isinstance(parsed_res, dict):
+                    for k, v in parsed_res.items():
+                        if str(v).lower().strip() in ["yes", "no"]:
+                            result[str(k)] = str(v).lower().strip()
+            except Exception:
+                pass
+                
+        return result
