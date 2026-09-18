@@ -144,7 +144,7 @@ class SelectorGenerator:
             "sku": "CSS_SELECTOR (e.g. .sku-value)",
             "price_container": "CSS_SELECTOR for product price block/wrapper containing current or both prices",
             "currency": "CSS_SELECTOR or empty string",
-            "available": "CSS_SELECTOR (e.g. .stock-status)",
+            "available": "CSS_SELECTOR (e.g. .box-stock-status)",
             "brand_name": "CSS_SELECTOR (e.g. .brand-link a)",
             "sales_notes": "CSS_SELECTOR or empty string",
             "main_image_element": "CSS_SELECTOR (e.g. .main-image img or parent a)",
@@ -225,10 +225,12 @@ CORRECT OUTPUT (DO THIS ONLY):
 - "model": CSS selector for model name or product series.
 - "sku": CSS selector for vendor article code, item SKU, or product code label.
 - "currency": CSS selector targeting currency code or symbol element.
-- "available": CSS selector targeting the GENERAL CONTAINER or WRAPPER that holds stock availability information (e.g., `.stock-wrapper`, `.product-availability`, `[data-availability-block]`, `[itemprop='offers']`). 
-  * CRITICAL RULE: DO NOT target specific status elements like `.in-stock`, `.out-of-stock`, or `.stock-status` directly, because these classes may dynamically change or be hidden when the user switches variants. 
-  * Instead, target the PARENT CONTAINER that wraps all availability states. The parser will extract visible text from this container and analyze it.
-  * Example: If the HTML has `<div class="stock-wrapper"><span class="in-stock"
+- "available": CSS selector for the PARENT CONTAINER that wraps the stock status information. 
+  * CRITICAL: DO NOT return the leaf element containing the text (e.g., NEVER return `span.stock-text` or `b`). ALWAYS return the wrapper (e.g., `.stock-wrapper`, `.product-availability`, `[data-availability]`, `div[itemprop="offers"]`).
+  * HEURISTIC HINT: The availability block is almost ALWAYS located immediately next to the Price block or the "Add to Cart" button. Look for a `div` or `span` that wraps both the price and the stock text.
+  * POSITIVE EXAMPLES: ".product-info__stock", ".availability-block", "#product-availability", "div[itemprop='offers']"
+  * NEGATIVE EXAMPLES (DO NOT USE): ".in-stock", ".out-of-stock", ".text-green", ".text-red" (These are dynamic and will break on other variants).
+  * IF NOT FOUND: If there is absolutely no structural block for availability in the HTML skeleton, return "".
 - "brand_name": CSS selector targeting manufacturer or brand link/text.
 
 2. PRICES ("price_container"):
@@ -281,6 +283,8 @@ CORRECT OUTPUT (DO THIS ONLY):
 2. Return strictly ONE clean W3C CSS selector string per field. Do NOT provide comma-separated fallback chains.
 3. Target semantic tags, microdata, or component structure (`[itemprop='...']`, `[data-price]`, `h1`, `.product-title`, `.price-box`).
 4. Never hardcode specific brand names or category slugs into selectors (e.g. NEVER use `a[href*='/asus/']`). Target generic structural elements like `.brand-link a`.
+RULE FOR "available": 
+5. The scraper will use this selector to get the innerText of the container. If you return a specific class like ".in-stock", the scraper will fail when the class changes to ".out-of-stock". You MUST identify the stable parent wrapper that contains the status, regardless of whether the item is in stock or not.
 
 HTML SKELETON:
 {cleaned_html}

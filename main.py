@@ -885,23 +885,31 @@ async def run_parser(
         
         for parent in state_machine.get_all_parents():
             # Проверяем родителя
-            if parent.available is None and getattr(parent, 'raw_availability_html', ''):
+            if parent.available is None:
+                availability_md = ""
+                if getattr(parent, 'raw_availability_html', ''):
+                    availability_md = OllamaEnricher.html_to_markdown(parent.raw_availability_html)
+                
                 availability_check_items.append({
                     "variant_id": parent.product_id,
                     "title": parent.title,
                     "variant_info": "",
-                    "availability_md": OllamaEnricher.html_to_markdown(parent.raw_availability_html)
+                    "availability_md": availability_md or "No availability context found on page"
                 })
             
             # Проверяем варианты
             for variant in parent.variants:
-                if variant.available is None and getattr(variant, 'raw_availability_html', ''):
+                if variant.available is None:
+                    availability_md = ""
+                    if getattr(variant, 'raw_availability_html', ''):
+                        availability_md = OllamaEnricher.html_to_markdown(variant.raw_availability_html)
+                    
                     variant_info = ", ".join([f"{k}: {v}" for k, v in variant.modification_attributes.items()])
                     availability_check_items.append({
                         "variant_id": variant.product_id,
                         "title": parent.title,
                         "variant_info": variant_info,
-                        "availability_md": OllamaEnricher.html_to_markdown(variant.raw_availability_html)
+                        "availability_md": availability_md or "No availability context found on page"
                     })
 
         if availability_check_items:

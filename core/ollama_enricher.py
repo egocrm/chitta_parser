@@ -668,7 +668,7 @@ STRICT RULES:
             logger.warning(f"⚠️ [OLLAMA OPTION RENAME WARN] Ошибка переименования опций через Ollama: {e}")
 
         return {}        
-        
+
     @classmethod
     def html_to_markdown(cls, html_str: str) -> str:
         """Преобразует строку HTML в Markdown."""
@@ -703,14 +703,13 @@ STRICT RULES:
         prompt = f"""You are an e-commerce availability checker.
 Based on the 'Availability Context' for each product/variant provided below, determine if it is currently in stock and ready to ship.
 
+If the context says "No availability context found on page", default to "yes" (assume in stock).
+If the context contains phrases like "out of stock", "немає", "sold out", " unavailable", "pre-order", return "no".
+Otherwise, return "yes".
+
 {items_text}
 
-Return ONLY a valid JSON object where keys are the ITEM IDs (from the "--- ITEM ... ---" headers) and values are strictly "yes" (if in stock) or "no" (if out of stock, pre-order, or unavailable).
-Example:
-{{
-  "133": "yes",
-  "134": "no"
-}}
+Return ONLY a valid JSON object where keys are the ITEM IDs and values are strictly "yes" or "no".
 """
         res = await self._call_ollama(prompt, step_name="AVAILABILITY CHECKER")
         

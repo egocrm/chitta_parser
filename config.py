@@ -54,7 +54,7 @@ GEMINI_MODEL = os.getenv("GEMINI_MODEL", "")  # или "gemini-2.5-flash"
 # ==============================================================================
 # ВРЕМЕННАЯ ЗАГЛУШКА: Использование готовой карты селекторов без вызова LLM
 # ==============================================================================
-USE_HARDCODED_SELECTOR_MAP = False  # Поставь False, когда нужно вернуть Gemini
+USE_HARDCODED_SELECTOR_MAP = True  # Поставь False, когда нужно вернуть Gemini
 
 HARDCODED_SELECTOR_MAP = {
     "product_id_element": "input#product_page_product_id",

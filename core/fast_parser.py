@@ -730,7 +730,8 @@ class FastSelectorParser:
             leaf_data['bonus'] = ''
             leaf_data['image'] = ''
             leaf_data['sales_notes'] = ''
-            
+            leaf_data['available'] = None        
+            leaf_data['raw_availability_html'] = ''           
             try:
                 # 1. Цены (пытаемся извлечь со страницы варианта)
                 price_sel = selectors_map.get("price_container") or selectors_map.get("fact_price", "")
@@ -779,26 +780,46 @@ class FastSelectorParser:
                     # else:
                         # logger.info(f"🏷️ [DFS DIAG] Бонус не рассчитан: old={old_p}, fact={fact_p}")
 
-                # 4. Наличие (с сохранением сырого HTML для LLM-батчинга)
+                # 4. Наличие (с жестким fallback, если селектор не сработал)
                 avail_sel = selectors_map.get("available", "")
+                found_availability = False
+                
                 if avail_sel:
                     try:
                         avail_locator = page.locator(avail_sel).first
                         if await avail_locator.count() > 0:
-                            # 1. Сохраняем сырой HTML-фрагмент для последующей обработки LLM (если текст будет неясным)
                             leaf_data['raw_availability_html'] = await avail_locator.inner_html(timeout=1500)
-                            
-                            # 2. Читаем видимый текст
                             visible_text = await avail_locator.inner_text(timeout=1500)
-                            
-                            # 3. Используем твой существующий метод. 
-                            # Если текст пуст, он вернет None. Если есть негативные маркеры - "no". Иначе - "yes".
                             leaf_data['available'] = self._normalize_availability(visible_text)
-                        # Если элемента нет, leaf_data['available'] останется None
+                            found_availability = True
                     except Exception as e:
-                    #     logger.debug(f"⚠️ [AVAILABILITY] Ошибка чтения селектора {avail_sel}: {e}")
+                        # logger.debug(f"⚠️ [AVAILABILITY] Ошибка чтения селектора {avail_sel}: {e}")
                         pass
-                        
+                
+                # FALLBACK: Если селектор пуст, или модель ошиблась и элементов 0
+                if not found_availability:
+                    fallback_sel = selectors_map.get("price_container") or selectors_map.get("title", "")
+                    if fallback_sel:
+                        try:
+                            fallback_locator = page.locator(fallback_sel).first
+                            if await fallback_locator.count() > 0:
+                                parent_html = await fallback_locator.evaluate("""
+                                    (el) => {
+                                        let current = el.parentElement;
+                                        for (let i = 0; i < 2 && current && current !== document.body; i++) {
+                                            current = current.parentElement;
+                                        }
+                                        return current ? current.innerHTML : '';
+                                    }
+                                """)
+                                if parent_html:
+                                    leaf_data['raw_availability_html'] = parent_html
+                                    leaf_data['available'] = None # Принудительно в None для LLM-батчинга
+                                    # logger.info(f"🔍 [AVAILABILITY FALLBACK] Основной селектор не сработал. Используем HTML родительского контейнера для LLM.")
+                        except Exception as e:
+                            # logger.debug(f"⚠️ [AVAILABILITY FALLBACK] Ошибка: {e}")
+                            pass
+
                 # 5. Sales Notes
                 sales_sel = selectors_map.get("sales_notes", "")
                 if sales_sel:
